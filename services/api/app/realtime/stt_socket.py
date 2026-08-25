@@ -242,7 +242,7 @@ async def websocket_stt(
         )
     except ProviderStreamError:
         await _send_terminal_error(
-            websocket, state, "provider_error", "STT provider failed."
+            websocket, state, "provider_error", "STT provider stream failed."
         )
     except Exception as exc:
         logger.error(
