@@ -7,4 +7,8 @@ class AppConfig {
     'WS_BASE_URL',
     defaultValue: 'ws://127.0.0.1:8000',
   );
+  static const bool liveSessionDebugTransport = bool.fromEnvironment(
+    'LIVE_SESSION_DEBUG_TRANSPORT',
+    defaultValue: false,
+  );
 }
