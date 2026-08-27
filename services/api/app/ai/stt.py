@@ -2,6 +2,7 @@ from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from typing import Literal, Protocol, runtime_checkable
 
+from app.core.config import settings
 from app.realtime.stt_protocol import AudioConfig, TranscriptKind
 
 
@@ -49,4 +50,23 @@ def unconfigured_stt_provider_factory() -> SttProviderStream:
 
 
 def get_stt_provider_factory() -> SttProviderFactory:
+    configured_api_key = settings.deepgram_api_key
+    if settings.stt_provider == "deepgram" and configured_api_key is not None:
+        api_key = configured_api_key.get_secret_value()
+        if api_key.strip():
+            from app.ai.deepgram import DeepgramSttStream
+
+            model = settings.deepgram_model
+            language = settings.deepgram_language
+            endpointing_ms = settings.deepgram_endpointing_ms
+
+            def deepgram_stt_provider_factory() -> SttProviderStream:
+                return DeepgramSttStream(
+                    api_key=configured_api_key,
+                    model=model,
+                    language=language,
+                    endpointing_ms=endpointing_ms,
+                )
+
+            return deepgram_stt_provider_factory
     return unconfigured_stt_provider_factory
