@@ -11,6 +11,7 @@ from app.ai.stt import (
     ProviderUnavailableError,
     SttTranscript,
     get_stt_provider_factory,
+    unconfigured_stt_provider_factory,
 )
 from app.main import app
 from app.realtime.stt_protocol import SttStart, SttStateMachine
@@ -42,6 +43,9 @@ def provider_override():
 def test_unconfigured_endpoint_reports_provider_unavailable_without_raw_detail(
     provider_override,
 ):
+    app.dependency_overrides[get_stt_provider_factory] = (
+        lambda: unconfigured_stt_provider_factory
+    )
     with TestClient(app).websocket_connect("/ws/stt") as websocket:
         websocket.send_json(VALID_START)
 
