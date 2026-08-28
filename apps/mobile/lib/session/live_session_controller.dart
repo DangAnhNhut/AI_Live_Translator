@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 
+import '../services/microphone_capture_service.dart';
 import '../services/microphone_permission_service.dart';
 import '../services/stt_websocket_service.dart';
 import 'live_session_state.dart';
@@ -13,6 +14,7 @@ class LiveSessionController extends ChangeNotifier {
   LiveSessionController({
     required MicrophonePermissionGateway permissionGateway,
     required SttSessionTransport transport,
+    MobileMicrophoneCapture? microphoneCapture,
     SessionClock? clock,
     SessionTicker? ticker,
     this.maxReconnectAttempts = 3,
@@ -20,6 +22,7 @@ class LiveSessionController extends ChangeNotifier {
     RetryDelay? retryDelay,
   }) : _permissionGateway = permissionGateway,
        _transport = transport,
+       _microphoneCapture = microphoneCapture ?? DebugNoopMicrophoneCapture(),
        _clock = clock ?? StopwatchSessionClock(),
        _ticker = ticker ?? PeriodicSessionTicker(),
        _retryDelay = retryDelay ?? Future<void>.delayed,
@@ -29,12 +32,15 @@ class LiveSessionController extends ChangeNotifier {
 
   final MicrophonePermissionGateway _permissionGateway;
   final SttSessionTransport _transport;
+  final MobileMicrophoneCapture _microphoneCapture;
   final SessionClock _clock;
   final SessionTicker _ticker;
   final RetryDelay _retryDelay;
   final int maxReconnectAttempts;
   final Duration reconnectDelay;
   late final StreamSubscription<SttSessionEvent> _eventSubscription;
+  StreamSubscription<Uint8List>? _audioSubscription;
+  Future<void>? _audioSendFuture;
 
   LiveSessionState _state = LiveSessionState.ready;
   String? _errorMessage;
@@ -49,6 +55,11 @@ class LiveSessionController extends ChangeNotifier {
   int _freshRetryGeneration = 0;
   Future<void>? _stopFuture;
   Future<void>? _freshRetryFuture;
+  Future<void>? _microphonePauseFuture;
+  Future<void>? _microphoneFailureCleanupFuture;
+  bool _forwardAudio = false;
+  bool _microphonePaused = false;
+  bool _isDisposed = false;
 
   LiveSessionState get state => _state;
   Duration get elapsed =>
@@ -62,7 +73,7 @@ class LiveSessionController extends ChangeNotifier {
   String get transcript => _transcriptSegments.values.join('\n');
 
   Future<void> start() async {
-    if (_state != LiveSessionState.ready) {
+    if (_isDisposed || _state != LiveSessionState.ready) {
       return;
     }
     final operationGeneration = ++_operationGeneration;
@@ -73,7 +84,7 @@ class LiveSessionController extends ChangeNotifier {
     _retryKind = null;
     _restorePausedAfterReconnect = false;
     _state = LiveSessionState.permission;
-    notifyListeners();
+    _notifyListeners();
 
     late final MicrophonePermissionResult permission;
     try {
@@ -87,7 +98,7 @@ class LiveSessionController extends ChangeNotifier {
       _canRetry = true;
       _retryKind = LiveSessionRetryKind.freshStart;
       _state = LiveSessionState.error;
-      notifyListeners();
+      _notifyListeners();
       return;
     }
     if (operationGeneration != _operationGeneration ||
@@ -103,12 +114,12 @@ class LiveSessionController extends ChangeNotifier {
           ? 'Microphone permission is required to start a live session.'
           : 'Microphone permission is permanently denied. Open app settings to enable it.';
       _state = LiveSessionState.error;
-      notifyListeners();
+      _notifyListeners();
       return;
     }
 
     _state = LiveSessionState.connecting;
-    notifyListeners();
+    _notifyListeners();
 
     try {
       await _transport.connect();
@@ -123,7 +134,7 @@ class LiveSessionController extends ChangeNotifier {
       _canRetry = error is SttSessionException ? error.recoverable : true;
       _retryKind = _canRetry ? LiveSessionRetryKind.freshStart : null;
       _state = LiveSessionState.error;
-      notifyListeners();
+      _notifyListeners();
       return;
     }
     if (operationGeneration != _operationGeneration ||
@@ -131,11 +142,43 @@ class LiveSessionController extends ChangeNotifier {
       return;
     }
 
+    try {
+      final audioStream = await _microphoneCapture.start();
+      if (operationGeneration != _operationGeneration ||
+          _state != LiveSessionState.connecting ||
+          _isDisposed) {
+        await _stopMicrophoneSafely();
+        return;
+      }
+      _audioSubscription = audioStream.listen(
+        _handleAudioChunk,
+        onError: _handleAudioStreamError,
+        onDone: _handleAudioStreamDone,
+      );
+    } catch (_) {
+      _forwardAudio = false;
+      await _stopMicrophoneSafely();
+      await _disconnectTransportSafely();
+      if (operationGeneration != _operationGeneration ||
+          _state != LiveSessionState.connecting ||
+          _isDisposed) {
+        return;
+      }
+      _errorMessage = 'Unable to start microphone capture.';
+      _canRetry = true;
+      _retryKind = LiveSessionRetryKind.freshStart;
+      _state = LiveSessionState.error;
+      _notifyListeners();
+      return;
+    }
+
+    _microphonePaused = false;
+    _forwardAudio = true;
     _state = LiveSessionState.listening;
     _retryKind = null;
     _restorePausedAfterReconnect = false;
     _startTimer();
-    notifyListeners();
+    _notifyListeners();
   }
 
   Future<bool> openAppSettings() async {
@@ -156,9 +199,9 @@ class LiveSessionController extends ChangeNotifier {
       _canRetry = false;
       _retryKind = null;
       _state = LiveSessionState.reconnecting;
-      notifyListeners();
+      _notifyListeners();
       final operationGeneration = ++_operationGeneration;
-      return _reconnect(operationGeneration);
+      return _pauseThenReconnect(operationGeneration);
     }
     final activeRetry = _freshRetryFuture;
     if (activeRetry != null) {
@@ -183,30 +226,43 @@ class LiveSessionController extends ChangeNotifier {
     await start();
   }
 
-  void pause() {
-    if (_state != LiveSessionState.listening) {
+  Future<void> pause() async {
+    if (_isDisposed || _state != LiveSessionState.listening) {
       return;
     }
 
+    _forwardAudio = false;
     _freezeTimer();
-    // Task 5 has no microphone stream yet. This transition deliberately owns
-    // session/timer state so audio pause can be attached here later.
     _state = LiveSessionState.paused;
-    notifyListeners();
+    _notifyListeners();
+    await _pauseMicrophone();
   }
 
-  void resume() {
-    if (_state != LiveSessionState.paused) {
+  Future<void> resume() async {
+    if (_isDisposed || _state != LiveSessionState.paused) {
       return;
     }
 
-    // Task 5 resumes session/timer state only; no audio stream exists yet.
+    final operationGeneration = _operationGeneration;
+    try {
+      await _microphoneCapture.resume();
+    } catch (_) {
+      return;
+    }
+    if (_isDisposed ||
+        operationGeneration != _operationGeneration ||
+        _state != LiveSessionState.paused) {
+      return;
+    }
+    _microphonePaused = false;
+    _forwardAudio = true;
     _state = LiveSessionState.listening;
     _startTimer();
-    notifyListeners();
+    _notifyListeners();
   }
 
   Future<void> stop() {
+    _forwardAudio = false;
     _freshRetryGeneration++;
     return _stopSession();
   }
@@ -231,6 +287,7 @@ class LiveSessionController extends ChangeNotifier {
 
   Future<void> _performStop() async {
     _operationGeneration++;
+    _forwardAudio = false;
 
     final shouldSendStop =
         _state == LiveSessionState.listening ||
@@ -239,6 +296,11 @@ class LiveSessionController extends ChangeNotifier {
         (_state == LiveSessionState.error &&
             _retryKind == LiveSessionRetryKind.activeSessionReconnect);
     _freezeTimer();
+
+    await _waitForMicrophoneFailureCleanup();
+    await _cancelAudioSubscription();
+    await _stopMicrophoneSafely();
+    await _waitForAudioSend();
 
     try {
       if (shouldSendStop) {
@@ -262,7 +324,186 @@ class LiveSessionController extends ChangeNotifier {
     _retryKind = null;
     _restorePausedAfterReconnect = false;
     _state = LiveSessionState.ready;
-    notifyListeners();
+    _notifyListeners();
+  }
+
+  void _handleAudioChunk(Uint8List audio) {
+    if (_isDisposed || !_forwardAudio || _state != LiveSessionState.listening) {
+      return;
+    }
+
+    final operationGeneration = _operationGeneration;
+    final previousSend = _audioSendFuture;
+    final sendFuture = previousSend == null
+        ? _sendAudioIfCurrent(audio, operationGeneration)
+        : previousSend.then(
+            (_) => _sendAudioIfCurrent(audio, operationGeneration),
+          );
+
+    late final Future<void> sharedSend;
+    sharedSend = sendFuture
+        .catchError((Object _, StackTrace _) {})
+        .whenComplete(() {
+          if (!identical(_audioSendFuture, sharedSend)) {
+            return;
+          }
+          _audioSendFuture = null;
+        });
+    _audioSendFuture = sharedSend;
+  }
+
+  Future<void> _sendAudioIfCurrent(
+    Uint8List audio,
+    int operationGeneration,
+  ) {
+    if (_isDisposed ||
+        !_forwardAudio ||
+        operationGeneration != _operationGeneration ||
+        _state != LiveSessionState.listening) {
+      return Future<void>.value();
+    }
+    try {
+      return _transport.sendAudio(audio);
+    } catch (_) {
+      // A synchronous socket failure is contained like an asynchronous one.
+      return Future<void>.value();
+    }
+  }
+
+  void _handleAudioStreamDone() {
+    _audioSubscription = null;
+    _handleUnexpectedMicrophoneEnd();
+  }
+
+  void _handleAudioStreamError(Object _, StackTrace _) {
+    final subscription = _audioSubscription;
+    _audioSubscription = null;
+    final cancelFuture = subscription?.cancel();
+    _handleUnexpectedMicrophoneEnd(cancelFuture: cancelFuture);
+  }
+
+  void _handleUnexpectedMicrophoneEnd({Future<void>? cancelFuture}) {
+    if (_isDisposed || !_forwardAudio || _state != LiveSessionState.listening) {
+      return;
+    }
+
+    _forwardAudio = false;
+    _operationGeneration++;
+    _freezeTimer();
+    _errorMessage = 'Microphone capture stopped unexpectedly.';
+    _canOpenAppSettings = false;
+    _canRetry = true;
+    _retryKind = LiveSessionRetryKind.freshStart;
+    _restorePausedAfterReconnect = false;
+    _state = LiveSessionState.error;
+    _notifyListeners();
+
+    late final Future<void> sharedCleanup;
+    sharedCleanup = _cleanupUnexpectedMicrophoneEnd(cancelFuture).whenComplete(
+      () {
+        if (identical(_microphoneFailureCleanupFuture, sharedCleanup)) {
+          _microphoneFailureCleanupFuture = null;
+        }
+      },
+    );
+    _microphoneFailureCleanupFuture = sharedCleanup;
+  }
+
+  Future<void> _cleanupUnexpectedMicrophoneEnd(
+    Future<void>? cancelFuture,
+  ) async {
+    if (cancelFuture != null) {
+      try {
+        await cancelFuture;
+      } catch (_) {
+        // Continue cleanup even if the failed stream cannot be cancelled.
+      }
+    }
+    await _stopMicrophoneSafely();
+    await _waitForAudioSend();
+    await _disconnectTransportSafely();
+  }
+
+  Future<void> _waitForMicrophoneFailureCleanup() async {
+    final cleanupFuture = _microphoneFailureCleanupFuture;
+    if (cleanupFuture == null) {
+      return;
+    }
+    try {
+      await cleanupFuture;
+    } catch (_) {
+      // Cleanup helpers already sanitize platform and transport failures.
+    }
+  }
+
+  Future<void> _pauseMicrophone() {
+    if (_microphonePaused) {
+      return Future<void>.value();
+    }
+    final activePause = _microphonePauseFuture;
+    if (activePause != null) {
+      return activePause;
+    }
+    late final Future<void> sharedPause;
+    sharedPause = _microphoneCapture
+        .pause()
+        .catchError((Object _, StackTrace _) {})
+        .whenComplete(() {
+          _microphonePaused = true;
+          if (identical(_microphonePauseFuture, sharedPause)) {
+            _microphonePauseFuture = null;
+          }
+        });
+    _microphonePauseFuture = sharedPause;
+    return sharedPause;
+  }
+
+  Future<void> _cancelAudioSubscription() async {
+    final subscription = _audioSubscription;
+    _audioSubscription = null;
+    if (subscription == null) {
+      return;
+    }
+    try {
+      await subscription.cancel();
+    } catch (_) {
+      // Remaining local and transport cleanup must still run.
+    }
+  }
+
+  Future<void> _waitForAudioSend() async {
+    final sendFuture = _audioSendFuture;
+    if (sendFuture == null) {
+      return;
+    }
+    try {
+      await sendFuture;
+    } catch (_) {
+      // Audio send failures are already normalized by the transport lifecycle.
+    }
+  }
+
+  Future<void> _stopMicrophoneSafely() async {
+    try {
+      await _microphoneCapture.stop();
+    } catch (_) {
+      // Remaining transport cleanup must still run.
+    }
+    _microphonePaused = false;
+  }
+
+  Future<void> _disconnectTransportSafely() async {
+    try {
+      await _transport.disconnect();
+    } catch (_) {
+      // Local lifecycle transitions must not expose cleanup details.
+    }
+  }
+
+  void _notifyListeners() {
+    if (!_isDisposed) {
+      notifyListeners();
+    }
   }
 
   void _startTimer() {
@@ -270,7 +511,7 @@ class LiveSessionController extends ChangeNotifier {
       return;
     }
     _listeningStartedAt = _clock.now;
-    _ticker.start(notifyListeners);
+    _ticker.start(_notifyListeners);
   }
 
   void _freezeTimer() {
@@ -284,9 +525,12 @@ class LiveSessionController extends ChangeNotifier {
   }
 
   void _handleTransportEvent(SttSessionEvent event) {
+    if (_isDisposed) {
+      return;
+    }
     if (event is SttTranscriptEvent) {
       _transcriptSegments[event.segmentId] = event.text;
-      notifyListeners();
+      _notifyListeners();
       return;
     }
     if (event is SttSessionErrorEvent &&
@@ -301,6 +545,10 @@ class LiveSessionController extends ChangeNotifier {
       final retryKind = _state == LiveSessionState.connecting
           ? LiveSessionRetryKind.freshStart
           : LiveSessionRetryKind.activeSessionReconnect;
+      _forwardAudio = false;
+      if (_state == LiveSessionState.listening) {
+        unawaited(_pauseMicrophone());
+      }
       _operationGeneration++;
       _freezeTimer();
       _errorMessage = event.message;
@@ -311,7 +559,7 @@ class LiveSessionController extends ChangeNotifier {
           retryKind == LiveSessionRetryKind.activeSessionReconnect &&
           restorePaused;
       _state = LiveSessionState.error;
-      notifyListeners();
+      _notifyListeners();
       return;
     }
     if (event is SttSessionClosedEvent &&
@@ -319,15 +567,33 @@ class LiveSessionController extends ChangeNotifier {
         (_state == LiveSessionState.listening ||
             _state == LiveSessionState.paused)) {
       _restorePausedAfterReconnect = _state == LiveSessionState.paused;
+      _forwardAudio = false;
       _freezeTimer();
       _state = LiveSessionState.reconnecting;
-      notifyListeners();
+      _notifyListeners();
       final operationGeneration = ++_operationGeneration;
-      unawaited(_reconnect(operationGeneration));
+      unawaited(_pauseThenReconnect(operationGeneration));
     }
   }
 
+  Future<void> _pauseThenReconnect(int operationGeneration) async {
+    await _pauseMicrophone();
+    if (_isDisposed ||
+        operationGeneration != _operationGeneration ||
+        _state != LiveSessionState.reconnecting) {
+      return;
+    }
+    await _reconnect(operationGeneration);
+  }
+
   Future<void> _reconnect(int operationGeneration) async {
+    await _waitForAudioSend();
+    if (_isDisposed ||
+        operationGeneration != _operationGeneration ||
+        _state != LiveSessionState.reconnecting) {
+      return;
+    }
+
     for (var attempt = 1; attempt <= maxReconnectAttempts; attempt++) {
       if (operationGeneration != _operationGeneration ||
           _state != LiveSessionState.reconnecting) {
@@ -345,6 +611,16 @@ class LiveSessionController extends ChangeNotifier {
           return;
         }
         final restorePaused = _restorePausedAfterReconnect;
+        if (!restorePaused) {
+          await _microphoneCapture.resume();
+          if (_isDisposed ||
+              operationGeneration != _operationGeneration ||
+              _state != LiveSessionState.reconnecting) {
+            return;
+          }
+          _microphonePaused = false;
+          _forwardAudio = true;
+        }
         _state = restorePaused
             ? LiveSessionState.paused
             : LiveSessionState.listening;
@@ -353,7 +629,7 @@ class LiveSessionController extends ChangeNotifier {
         if (!restorePaused) {
           _startTimer();
         }
-        notifyListeners();
+        _notifyListeners();
         return;
       } catch (error) {
         if (operationGeneration != _operationGeneration ||
@@ -374,7 +650,7 @@ class LiveSessionController extends ChangeNotifier {
             _restorePausedAfterReconnect = false;
           }
           _state = LiveSessionState.error;
-          notifyListeners();
+          _notifyListeners();
           return;
         }
         await _retryDelay(reconnectDelay);
@@ -384,10 +660,31 @@ class LiveSessionController extends ChangeNotifier {
 
   @override
   void dispose() {
+    if (_isDisposed) {
+      return;
+    }
+    _isDisposed = true;
+    _forwardAudio = false;
     _operationGeneration++;
-    unawaited(_eventSubscription.cancel());
     _ticker.dispose();
-    unawaited(_transport.disconnect());
+    unawaited(_performDispose());
     super.dispose();
+  }
+
+  Future<void> _performDispose() async {
+    try {
+      await _eventSubscription.cancel();
+    } catch (_) {
+      // Continue disposal even if the event stream is already gone.
+    }
+    await _waitForMicrophoneFailureCleanup();
+    await _cancelAudioSubscription();
+    try {
+      await _microphoneCapture.dispose();
+    } catch (_) {
+      // Transport cleanup must still run.
+    }
+    await _waitForAudioSend();
+    await _disconnectTransportSafely();
   }
 }

@@ -104,7 +104,7 @@ class LiveSessionScreen extends StatelessWidget {
                       children: [
                         Expanded(
                           child: FilledButton(
-                            onPressed: controller.pause,
+                            onPressed: () => unawaited(controller.pause()),
                             child: const Text('Pause'),
                           ),
                         ),
@@ -122,7 +122,7 @@ class LiveSessionScreen extends StatelessWidget {
                       children: [
                         Expanded(
                           child: FilledButton(
-                            onPressed: controller.resume,
+                            onPressed: () => unawaited(controller.resume()),
                             child: const Text('Resume'),
                           ),
                         ),

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import 'screens/live_session_screen.dart';
 import 'services/debug_stt_session_transport.dart';
+import 'services/microphone_capture_service.dart';
 import 'services/microphone_permission_service.dart';
 import 'services/stt_websocket_service.dart';
 import 'session/live_session_controller.dart';
@@ -11,11 +12,13 @@ class AiLiveTranslatorApp extends StatefulWidget {
     super.key,
     required this.permissionGateway,
     required this.sessionTransport,
+    required this.microphoneCapture,
     this.debugControls,
   });
 
   final MicrophonePermissionGateway permissionGateway;
   final SttSessionTransport sessionTransport;
+  final MobileMicrophoneCapture microphoneCapture;
   final DebugSttSessionControls? debugControls;
 
   @override
@@ -31,6 +34,7 @@ class _AiLiveTranslatorAppState extends State<AiLiveTranslatorApp> {
     _controller = LiveSessionController(
       permissionGateway: widget.permissionGateway,
       transport: widget.sessionTransport,
+      microphoneCapture: widget.microphoneCapture,
     );
   }
 

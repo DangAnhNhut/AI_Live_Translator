@@ -1,7 +1,18 @@
+import 'dart:typed_data';
+
 import 'package:ai_live_translator_mobile/services/debug_stt_session_transport.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test('debug sendAudio is a provider-free no-op', () async {
+    final transport = DebugSttSessionTransport();
+
+    await transport.sendAudio(Uint8List.fromList([0, 1]));
+
+    expect(transport.isConnected, isFalse);
+    await transport.dispose();
+  });
+
   test('debug connect becomes ready after the configured delay', () async {
     final transport = DebugSttSessionTransport(
       initialConnectDelay: Duration.zero,

@@ -90,12 +90,12 @@ void main() {
       expect(controller.state, LiveSessionState.listening);
 
       ticker.advance(const Duration(seconds: 3));
-      controller.pause();
+      await controller.pause();
       ticker.advance(const Duration(seconds: 5));
       expect(controller.state, LiveSessionState.paused);
       expect(controller.elapsed, const Duration(seconds: 3));
 
-      controller.resume();
+      await controller.resume();
       ticker.advance(const Duration(seconds: 2));
       expect(controller.state, LiveSessionState.listening);
       expect(controller.elapsed, const Duration(seconds: 5));

@@ -1,8 +1,10 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:ai_live_translator_mobile/app.dart';
 import 'package:ai_live_translator_mobile/screens/live_session_screen.dart';
 import 'package:ai_live_translator_mobile/services/debug_stt_session_transport.dart';
+import 'package:ai_live_translator_mobile/services/microphone_capture_service.dart';
 import 'package:ai_live_translator_mobile/services/microphone_permission_service.dart';
 import 'package:ai_live_translator_mobile/services/stt_websocket_service.dart';
 import 'package:ai_live_translator_mobile/session/live_session_controller.dart';
@@ -39,6 +41,9 @@ class FakeScreenTransport implements SttSessionTransport {
       throw connectError!;
     }
   }
+
+  @override
+  Future<void> sendAudio(Uint8List audio) async {}
 
   @override
   Future<void> disconnect() async {}
@@ -121,6 +126,7 @@ void main() {
       AiLiveTranslatorApp(
         permissionGateway: FakeScreenPermissionGateway(),
         sessionTransport: transport,
+        microphoneCapture: DebugNoopMicrophoneCapture(),
         debugControls: FakeDebugControls(),
       ),
     );
@@ -194,7 +200,7 @@ void main() {
 
     expect(controls.holdCalls, 1);
     expect(controls.disconnectCalls, 1);
-    await controller.stop();
+    await tester.runAsync(controller.stop);
     controller.dispose();
     await transport.eventController.close();
   });
@@ -222,7 +228,7 @@ void main() {
 
     expect(controls.failCalls, 1);
     expect(controls.disconnectCalls, 1);
-    await controller.stop();
+    await tester.runAsync(controller.stop);
     controller.dispose();
     await transport.eventController.close();
   });
@@ -255,7 +261,7 @@ void main() {
     await tester.tap(find.text('Complete Reconnect'));
 
     expect(controls.completeCalls, 1);
-    await controller.stop();
+    await tester.runAsync(controller.stop);
     reconnectReady.complete();
     await tester.pump();
     controller.dispose();
@@ -292,7 +298,7 @@ void main() {
     await tester.pump();
 
     expect(find.text('Listening'), findsOneWidget);
-    await controller.stop();
+    await tester.runAsync(controller.stop);
     controller.dispose();
     await tester.pump();
     await transport.dispose();
@@ -337,7 +343,7 @@ void main() {
     expect(find.byType(CircularProgressIndicator), findsOneWidget);
     expect(find.widgetWithText(OutlinedButton, 'Stop'), findsOneWidget);
 
-    await controller.stop();
+    await tester.runAsync(controller.stop);
     connectReady.complete();
     await tester.pump();
     controller.dispose();
@@ -366,7 +372,7 @@ void main() {
     expect(find.byType(CircularProgressIndicator), findsOneWidget);
     expect(find.text('00:00'), findsOneWidget);
 
-    await controller.stop();
+    await tester.runAsync(controller.stop);
     permissionReady.complete(MicrophonePermissionResult.granted);
     await tester.pump();
     controller.dispose();
@@ -389,7 +395,7 @@ void main() {
     expect(find.widgetWithText(FilledButton, 'Pause'), findsOneWidget);
     expect(find.widgetWithText(OutlinedButton, 'Stop'), findsOneWidget);
 
-    await controller.stop();
+    await tester.runAsync(controller.stop);
     controller.dispose();
     await transport.eventController.close();
   });
@@ -411,7 +417,7 @@ void main() {
     expect(find.widgetWithText(FilledButton, 'Resume'), findsOneWidget);
     expect(find.widgetWithText(OutlinedButton, 'Stop'), findsOneWidget);
 
-    await controller.stop();
+    await tester.runAsync(controller.stop);
     controller.dispose();
     await transport.eventController.close();
   });
@@ -440,7 +446,7 @@ void main() {
     expect(find.byType(CircularProgressIndicator), findsOneWidget);
     expect(find.widgetWithText(OutlinedButton, 'Stop'), findsOneWidget);
 
-    await controller.stop();
+    await tester.runAsync(controller.stop);
     reconnectReady.complete();
     await tester.pump();
     controller.dispose();
@@ -471,7 +477,7 @@ void main() {
     expect(find.text('Retry'), findsNothing);
     expect(find.widgetWithText(OutlinedButton, 'Stop'), findsOneWidget);
 
-    await controller.stop();
+    await tester.runAsync(controller.stop);
     controller.dispose();
     await transport.eventController.close();
   });
@@ -487,7 +493,13 @@ void main() {
       MaterialApp(home: LiveSessionScreen(controller: controller)),
     );
 
-    await tester.tap(find.widgetWithText(OutlinedButton, 'Stop'));
+    final stopButton = tester.widget<OutlinedButton>(
+      find.widgetWithText(OutlinedButton, 'Stop'),
+    );
+    await tester.runAsync(() async {
+      stopButton.onPressed!();
+      await controller.stop();
+    });
     await tester.pump();
 
     expect(find.text('Ready'), findsOneWidget);
@@ -524,7 +536,7 @@ void main() {
     await tester.pump();
     expect(find.text('01:05'), findsOneWidget);
 
-    await controller.stop();
+    await tester.runAsync(controller.stop);
     controller.dispose();
     await transport.eventController.close();
   });
@@ -555,7 +567,7 @@ void main() {
     expect(find.text('Transcript'), findsOneWidget);
     expect(find.text('Actual backend transcript'), findsOneWidget);
 
-    await controller.stop();
+    await tester.runAsync(controller.stop);
     controller.dispose();
     await transport.eventController.close();
   });

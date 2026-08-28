@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:ai_live_translator_mobile/services/realtime_websocket_service.dart';
 import 'package:ai_live_translator_mobile/services/stt_websocket_service.dart';
@@ -26,6 +27,19 @@ class FakeSttSocketConnection implements SocketConnection {
     closed = true;
     await controller.close();
   }
+}
+
+Future<void> expectAudioToBeRejectedWhenNotReady(
+  SttSessionTransport transport,
+) {
+  return expectLater(
+    transport.sendAudio(Uint8List(0)),
+    throwsA(
+      isA<SttSessionException>()
+          .having((error) => error.code, 'code', 'session_not_ready')
+          .having((error) => error.recoverable, 'recoverable', isTrue),
+    ),
+  );
 }
 
 void main() {
@@ -61,6 +75,166 @@ void main() {
 
     expect(connected, isTrue);
 
+    await service.disconnect();
+  });
+
+  test('sends raw binary audio only after the STT session is ready', () async {
+    final socket = FakeSttSocketConnection();
+    final service = SttWebSocketService(
+      baseUrl: 'ws://192.168.1.220:8000',
+      connector: (uri) async => socket,
+    );
+    final audio = Uint8List.fromList([0, 1, 127, 255]);
+
+    final connectFuture = service.connect();
+    await Future<void>.delayed(Duration.zero);
+
+    await expectLater(
+      service.sendAudio(audio),
+      throwsA(
+        isA<SttSessionException>()
+            .having((error) => error.code, 'code', 'session_not_ready')
+            .having((error) => error.recoverable, 'recoverable', isTrue),
+      ),
+    );
+    expect(socket.sentMessages, hasLength(1));
+
+    socket.controller.add(jsonEncode({'type': 'stt.ready'}));
+    await connectFuture;
+
+    await service.sendAudio(audio);
+
+    expect(socket.sentMessages, hasLength(2));
+    expect(socket.sentMessages.last, same(audio));
+    expect(socket.sentMessages.last, isA<Uint8List>());
+
+    await service.disconnect();
+  });
+
+  test('stop resets readiness and rejects later audio', () async {
+    final socket = FakeSttSocketConnection();
+    final service = SttWebSocketService(
+      baseUrl: 'ws://192.168.1.220:8000',
+      connector: (uri) async => socket,
+    );
+    final connectFuture = service.connect();
+    await Future<void>.delayed(Duration.zero);
+    socket.controller.add(jsonEncode({'type': 'stt.ready'}));
+    await connectFuture;
+
+    await service.stop();
+
+    await expectAudioToBeRejectedWhenNotReady(service);
+    expect(socket.sentMessages, hasLength(2));
+
+    await service.disconnect();
+  });
+
+  test(
+    'disconnect resets readiness before a new connection is ready',
+    () async {
+      final firstSocket = FakeSttSocketConnection();
+      final secondSocket = FakeSttSocketConnection();
+      final sockets = <FakeSttSocketConnection>[firstSocket, secondSocket];
+      final service = SttWebSocketService(
+        baseUrl: 'ws://192.168.1.220:8000',
+        connector: (uri) async => sockets.removeAt(0),
+      );
+      final firstConnect = service.connect();
+      await Future<void>.delayed(Duration.zero);
+      firstSocket.controller.add(jsonEncode({'type': 'stt.ready'}));
+      await firstConnect;
+
+      await service.disconnect();
+      final secondConnect = service.connect();
+      await Future<void>.delayed(Duration.zero);
+
+      await expectAudioToBeRejectedWhenNotReady(service);
+      expect(secondSocket.sentMessages, hasLength(1));
+
+      secondSocket.controller.add(jsonEncode({'type': 'stt.ready'}));
+      await secondConnect;
+      await service.disconnect();
+    },
+  );
+
+  test(
+    'normalized stt.closed resets readiness and rejects later audio',
+    () async {
+      final socket = FakeSttSocketConnection();
+      final service = SttWebSocketService(
+        baseUrl: 'ws://192.168.1.220:8000',
+        connector: (uri) async => socket,
+      );
+      final closed = service.events
+          .where((event) => event is SttSessionClosedEvent)
+          .cast<SttSessionClosedEvent>()
+          .first;
+      final connectFuture = service.connect();
+      await Future<void>.delayed(Duration.zero);
+      socket.controller.add(jsonEncode({'type': 'stt.ready'}));
+      await connectFuture;
+
+      socket.controller.add(jsonEncode({'type': 'stt.closed'}));
+      await closed;
+
+      await expectAudioToBeRejectedWhenNotReady(service);
+      await service.disconnect();
+    },
+  );
+
+  test(
+    'stream completion resets readiness before a new connection is ready',
+    () async {
+      final firstSocket = FakeSttSocketConnection();
+      final secondSocket = FakeSttSocketConnection();
+      final sockets = <FakeSttSocketConnection>[firstSocket, secondSocket];
+      final service = SttWebSocketService(
+        baseUrl: 'ws://192.168.1.220:8000',
+        connector: (uri) async => sockets.removeAt(0),
+      );
+      final closed = service.events
+          .where((event) => event is SttSessionClosedEvent)
+          .cast<SttSessionClosedEvent>()
+          .first;
+      final firstConnect = service.connect();
+      await Future<void>.delayed(Duration.zero);
+      firstSocket.controller.add(jsonEncode({'type': 'stt.ready'}));
+      await firstConnect;
+
+      await firstSocket.controller.close();
+      await closed;
+      final secondConnect = service.connect();
+      await Future<void>.delayed(Duration.zero);
+
+      await expectAudioToBeRejectedWhenNotReady(service);
+      expect(secondSocket.sentMessages, hasLength(1));
+
+      secondSocket.controller.add(jsonEncode({'type': 'stt.ready'}));
+      await secondConnect;
+      await service.disconnect();
+    },
+  );
+
+  test('stream errors reset readiness and reject later audio', () async {
+    final socket = FakeSttSocketConnection();
+    final service = SttWebSocketService(
+      baseUrl: 'ws://192.168.1.220:8000',
+      connector: (uri) async => socket,
+    );
+    final closed = service.events
+        .where((event) => event is SttSessionClosedEvent)
+        .cast<SttSessionClosedEvent>()
+        .first;
+    final connectFuture = service.connect();
+    await Future<void>.delayed(Duration.zero);
+    socket.controller.add(jsonEncode({'type': 'stt.ready'}));
+    await connectFuture;
+
+    socket.controller.addError(StateError('socket stream error'));
+    await closed;
+
+    await expectAudioToBeRejectedWhenNotReady(service);
     await service.disconnect();
   });
 

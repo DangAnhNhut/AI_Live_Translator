@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'realtime_websocket_service.dart';
 
@@ -80,6 +81,8 @@ abstract interface class SttSessionTransport {
 
   Future<void> connect();
 
+  Future<void> sendAudio(Uint8List audio);
+
   Future<void> stop();
 
   Future<void> disconnect();
@@ -102,6 +105,7 @@ class SttWebSocketService implements SttSessionTransport {
   StreamSubscription<dynamic>? _subscription;
   Future<void>? _connectFuture;
   _SttConnectAttempt? _connectAttempt;
+  bool _isReady = false;
 
   @override
   Stream<SttSessionEvent> get events => _eventsController.stream;
@@ -127,6 +131,7 @@ class SttWebSocketService implements SttSessionTransport {
 
   Future<void> _connect(_SttConnectAttempt attempt) async {
     try {
+      _isReady = false;
       await _closeSocket();
       final socketFuture = _connector(
         Uri.parse('$baseUrl/ws/stt'),
@@ -184,10 +189,12 @@ class SttWebSocketService implements SttSessionTransport {
           }
           if (payload is Map<String, dynamic>) {
             if (payload['type'] == 'stt.ready' && !ready.isCompleted) {
+              _isReady = true;
               ready.complete();
               return;
             }
             if (payload['type'] == 'stt.closed') {
+              _isReady = false;
               if (!closedEventSent) {
                 closedEventSent = true;
                 _eventsController.add(
@@ -269,6 +276,7 @@ class SttWebSocketService implements SttSessionTransport {
           if (identical(_socket, socket)) {
             _socket = null;
           }
+          _isReady = false;
         },
         onError: (Object error, StackTrace stackTrace) {
           if (attempt.isCancelled || !identical(_connectAttempt, attempt)) {
@@ -282,6 +290,7 @@ class SttWebSocketService implements SttSessionTransport {
               const SttSessionClosedEvent(unexpected: true),
             );
           }
+          _isReady = false;
         },
       );
       socket.send(
@@ -312,7 +321,21 @@ class SttWebSocketService implements SttSessionTransport {
   }
 
   @override
+  Future<void> sendAudio(Uint8List audio) async {
+    final socket = _socket;
+    if (!_isReady || socket == null) {
+      throw const SttSessionException(
+        code: 'session_not_ready',
+        message: 'The STT session is not ready to receive audio.',
+        recoverable: true,
+      );
+    }
+    socket.send(audio);
+  }
+
+  @override
   Future<void> stop() async {
+    _isReady = false;
     _socket?.send(jsonEncode({'type': 'stt.stop'}));
   }
 
@@ -326,6 +349,7 @@ class SttWebSocketService implements SttSessionTransport {
   }
 
   Future<void> _closeSocket() async {
+    _isReady = false;
     await _subscription?.cancel();
     _subscription = null;
     final socket = _socket;

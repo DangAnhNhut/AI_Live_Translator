@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'stt_websocket_service.dart';
 
@@ -83,6 +84,9 @@ class DebugSttSessionTransport
     _isConnected = true;
     _hasConnectedOnce = true;
   }
+
+  @override
+  Future<void> sendAudio(Uint8List audio) async {}
 
   @override
   void configureNextReconnectToWait() {
