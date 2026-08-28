@@ -23,6 +23,13 @@ class LiveSessionScreen extends StatelessWidget {
       body: AnimatedBuilder(
         animation: controller,
         builder: (context, _) {
+          if (controller.hasPendingBenchmarkTranscriptRender) {
+            final transcriptRevision =
+                controller.latestBenchmarkTranscriptRevision;
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              controller.recordBenchmarkTranscriptRendered(transcriptRevision);
+            });
+          }
           return SafeArea(
             child: Padding(
               padding: const EdgeInsets.all(24),

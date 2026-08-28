@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import 'benchmark/stt_benchmark.dart';
 import 'screens/live_session_screen.dart';
 import 'services/debug_stt_session_transport.dart';
 import 'services/microphone_capture_service.dart';
@@ -14,12 +15,14 @@ class AiLiveTranslatorApp extends StatefulWidget {
     required this.sessionTransport,
     required this.microphoneCapture,
     this.debugControls,
+    this.benchmark = const DisabledLiveSessionBenchmark(),
   });
 
   final MicrophonePermissionGateway permissionGateway;
   final SttSessionTransport sessionTransport;
   final MobileMicrophoneCapture microphoneCapture;
   final DebugSttSessionControls? debugControls;
+  final LiveSessionBenchmark benchmark;
 
   @override
   State<AiLiveTranslatorApp> createState() => _AiLiveTranslatorAppState();
@@ -35,6 +38,7 @@ class _AiLiveTranslatorAppState extends State<AiLiveTranslatorApp> {
       permissionGateway: widget.permissionGateway,
       transport: widget.sessionTransport,
       microphoneCapture: widget.microphoneCapture,
+      benchmark: widget.benchmark,
     );
   }
 

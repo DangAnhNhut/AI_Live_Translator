@@ -14,4 +14,8 @@ void main() {
     );
   },
 );
+
+  test('STT benchmark instrumentation defaults to disabled', () {
+    expect(AppConfig.sttBenchmark, isFalse);
+  });
 }

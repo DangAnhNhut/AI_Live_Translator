@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import 'app.dart';
+import 'benchmark/stt_benchmark.dart';
 import 'core/app_config.dart';
 import 'core/live_session_transport_binding.dart';
 import 'services/debug_stt_session_transport.dart';
@@ -17,6 +18,13 @@ void main() {
     connector: ioSocketConnector,
   );
   final productionMicrophoneCapture = RecordMicrophoneCapture();
+  final LiveSessionBenchmark benchmark = AppConfig.sttBenchmark
+      ? SttBenchmarkRecorder(
+          enabled: true,
+          clock: StopwatchBenchmarkElapsedClock(),
+          sink: DebugPrintBenchmarkJsonlSink(),
+        )
+      : const DisabledLiveSessionBenchmark();
   final transportBinding = selectLiveSessionTransport(
     isDebugMode: kDebugMode,
     debugTransportRequested: AppConfig.liveSessionDebugTransport,
@@ -32,6 +40,7 @@ void main() {
       sessionTransport: transportBinding.transport,
       microphoneCapture: transportBinding.microphoneCapture,
       debugControls: transportBinding.debugControls,
+      benchmark: benchmark,
     ),
   );
 }

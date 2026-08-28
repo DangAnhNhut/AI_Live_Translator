@@ -11,4 +11,8 @@ class AppConfig {
     'LIVE_SESSION_DEBUG_TRANSPORT',
     defaultValue: false,
   );
+  static const bool sttBenchmark = bool.fromEnvironment(
+    'STT_BENCHMARK',
+    defaultValue: false,
+  );
 }

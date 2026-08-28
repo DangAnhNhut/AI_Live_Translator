@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 
+import '../benchmark/stt_benchmark.dart';
 import '../services/microphone_capture_service.dart';
 import '../services/microphone_permission_service.dart';
 import '../services/stt_websocket_service.dart';
@@ -17,6 +18,7 @@ class LiveSessionController extends ChangeNotifier {
     MobileMicrophoneCapture? microphoneCapture,
     SessionClock? clock,
     SessionTicker? ticker,
+    LiveSessionBenchmark? benchmark,
     this.maxReconnectAttempts = 3,
     this.reconnectDelay = const Duration(milliseconds: 500),
     RetryDelay? retryDelay,
@@ -25,6 +27,7 @@ class LiveSessionController extends ChangeNotifier {
        _microphoneCapture = microphoneCapture ?? DebugNoopMicrophoneCapture(),
        _clock = clock ?? StopwatchSessionClock(),
        _ticker = ticker ?? PeriodicSessionTicker(),
+       _benchmark = benchmark ?? const DisabledLiveSessionBenchmark(),
        _retryDelay = retryDelay ?? Future<void>.delayed,
        assert(maxReconnectAttempts > 0) {
     _eventSubscription = _transport.events.listen(_handleTransportEvent);
@@ -35,6 +38,7 @@ class LiveSessionController extends ChangeNotifier {
   final MobileMicrophoneCapture _microphoneCapture;
   final SessionClock _clock;
   final SessionTicker _ticker;
+  final LiveSessionBenchmark _benchmark;
   final RetryDelay _retryDelay;
   final int maxReconnectAttempts;
   final Duration reconnectDelay;
@@ -71,12 +75,21 @@ class LiveSessionController extends ChangeNotifier {
   bool get canOpenAppSettings => _canOpenAppSettings;
   bool get canRetry => _canRetry;
   String get transcript => _transcriptSegments.values.join('\n');
+  bool get benchmarkEnabled => _benchmark.enabled;
+  bool get hasPendingBenchmarkTranscriptRender => _benchmark.hasPendingUiRender;
+  int get latestBenchmarkTranscriptRevision =>
+      _benchmark.latestTranscriptRevision;
+
+  void recordBenchmarkTranscriptRendered(int transcriptRevision) {
+    _benchmark.recordUiRendered(transcriptRevision);
+  }
 
   Future<void> start() async {
     if (_isDisposed || _state != LiveSessionState.ready) {
       return;
     }
     final operationGeneration = ++_operationGeneration;
+    _benchmark.sessionStartRequested();
 
     _errorMessage = null;
     _canOpenAppSettings = false;
@@ -95,6 +108,7 @@ class LiveSessionController extends ChangeNotifier {
         return;
       }
       _errorMessage = 'Unable to request microphone permission.';
+      _benchmark.recordError();
       _canRetry = true;
       _retryKind = LiveSessionRetryKind.freshStart;
       _state = LiveSessionState.error;
@@ -113,6 +127,7 @@ class LiveSessionController extends ChangeNotifier {
       _errorMessage = permission == MicrophonePermissionResult.denied
           ? 'Microphone permission is required to start a live session.'
           : 'Microphone permission is permanently denied. Open app settings to enable it.';
+      _benchmark.recordError();
       _state = LiveSessionState.error;
       _notifyListeners();
       return;
@@ -121,6 +136,7 @@ class LiveSessionController extends ChangeNotifier {
     _state = LiveSessionState.connecting;
     _notifyListeners();
 
+    _benchmark.connectStarted();
     try {
       await _transport.connect();
     } catch (error) {
@@ -131,6 +147,7 @@ class LiveSessionController extends ChangeNotifier {
       _errorMessage = error is SttSessionException
           ? error.message
           : 'WebSocket connection failed. Check that the backend is available.';
+      _benchmark.recordError();
       _canRetry = error is SttSessionException ? error.recoverable : true;
       _retryKind = _canRetry ? LiveSessionRetryKind.freshStart : null;
       _state = LiveSessionState.error;
@@ -141,6 +158,7 @@ class LiveSessionController extends ChangeNotifier {
         _state != LiveSessionState.connecting) {
       return;
     }
+    _benchmark.websocketReady();
 
     try {
       final audioStream = await _microphoneCapture.start();
@@ -150,6 +168,7 @@ class LiveSessionController extends ChangeNotifier {
         await _stopMicrophoneSafely();
         return;
       }
+      _benchmark.microphoneStarted();
       _audioSubscription = audioStream.listen(
         _handleAudioChunk,
         onError: _handleAudioStreamError,
@@ -165,6 +184,7 @@ class LiveSessionController extends ChangeNotifier {
         return;
       }
       _errorMessage = 'Unable to start microphone capture.';
+      _benchmark.recordError();
       _canRetry = true;
       _retryKind = LiveSessionRetryKind.freshStart;
       _state = LiveSessionState.error;
@@ -178,6 +198,7 @@ class LiveSessionController extends ChangeNotifier {
     _retryKind = null;
     _restorePausedAfterReconnect = false;
     _startTimer();
+    _benchmark.listeningStarted();
     _notifyListeners();
   }
 
@@ -199,6 +220,7 @@ class LiveSessionController extends ChangeNotifier {
       _canRetry = false;
       _retryKind = null;
       _state = LiveSessionState.reconnecting;
+      _benchmark.reconnectStarted();
       _notifyListeners();
       final operationGeneration = ++_operationGeneration;
       return _pauseThenReconnect(operationGeneration);
@@ -234,6 +256,7 @@ class LiveSessionController extends ChangeNotifier {
     _forwardAudio = false;
     _freezeTimer();
     _state = LiveSessionState.paused;
+    _benchmark.paused();
     _notifyListeners();
     await _pauseMicrophone();
   }
@@ -258,6 +281,7 @@ class LiveSessionController extends ChangeNotifier {
     _forwardAudio = true;
     _state = LiveSessionState.listening;
     _startTimer();
+    _benchmark.resumed();
     _notifyListeners();
   }
 
@@ -323,6 +347,7 @@ class LiveSessionController extends ChangeNotifier {
     _canRetry = false;
     _retryKind = null;
     _restorePausedAfterReconnect = false;
+    _benchmark.stopped();
     _state = LiveSessionState.ready;
     _notifyListeners();
   }
@@ -330,6 +355,10 @@ class LiveSessionController extends ChangeNotifier {
   void _handleAudioChunk(Uint8List audio) {
     if (_isDisposed || !_forwardAudio || _state != LiveSessionState.listening) {
       return;
+    }
+
+    if (_benchmark.enabled) {
+      _benchmark.recordOutgoingPcm(audio);
     }
 
     final operationGeneration = _operationGeneration;
@@ -391,6 +420,7 @@ class LiveSessionController extends ChangeNotifier {
     _operationGeneration++;
     _freezeTimer();
     _errorMessage = 'Microphone capture stopped unexpectedly.';
+    _benchmark.recordError();
     _canOpenAppSettings = false;
     _canRetry = true;
     _retryKind = LiveSessionRetryKind.freshStart;
@@ -529,6 +559,14 @@ class LiveSessionController extends ChangeNotifier {
       return;
     }
     if (event is SttTranscriptEvent) {
+      if (_benchmark.enabled) {
+        _benchmark.recordTranscriptReceived(
+          kind: event.kind == SttTranscriptKind.interim
+              ? SttBenchmarkTranscriptKind.interim
+              : SttBenchmarkTranscriptKind.finalResult,
+          segmentId: event.segmentId,
+        );
+      }
       _transcriptSegments[event.segmentId] = event.text;
       _notifyListeners();
       return;
@@ -552,6 +590,7 @@ class LiveSessionController extends ChangeNotifier {
       _operationGeneration++;
       _freezeTimer();
       _errorMessage = event.message;
+      _benchmark.recordError();
       _canRetry = event.recoverable;
       _retryKind = event.recoverable ? retryKind : null;
       _restorePausedAfterReconnect =
@@ -570,6 +609,7 @@ class LiveSessionController extends ChangeNotifier {
       _forwardAudio = false;
       _freezeTimer();
       _state = LiveSessionState.reconnecting;
+      _benchmark.reconnectStarted();
       _notifyListeners();
       final operationGeneration = ++_operationGeneration;
       unawaited(_pauseThenReconnect(operationGeneration));
@@ -629,6 +669,7 @@ class LiveSessionController extends ChangeNotifier {
         if (!restorePaused) {
           _startTimer();
         }
+        _benchmark.reconnectReady();
         _notifyListeners();
         return;
       } catch (error) {
@@ -636,9 +677,11 @@ class LiveSessionController extends ChangeNotifier {
             _state != LiveSessionState.reconnecting) {
           return;
         }
+        _benchmark.recordError();
         final terminalProtocolError =
             error is SttSessionException && !error.recoverable;
         if (terminalProtocolError || attempt == maxReconnectAttempts) {
+          _benchmark.reconnectFailed();
           _errorMessage = terminalProtocolError
               ? error.message
               : 'Unable to reconnect to the STT session.';
@@ -666,6 +709,7 @@ class LiveSessionController extends ChangeNotifier {
     _isDisposed = true;
     _forwardAudio = false;
     _operationGeneration++;
+    _benchmark.stopped();
     _ticker.dispose();
     unawaited(_performDispose());
     super.dispose();
