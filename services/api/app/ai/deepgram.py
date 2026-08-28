@@ -10,6 +10,7 @@ from pydantic import SecretStr
 from websockets.asyncio.client import connect
 
 from app.ai.stt import ProviderStreamError, SttTranscript
+from app.benchmark.stt_benchmark import SttBenchmarkObserver
 from app.realtime.stt_protocol import AudioConfig
 
 
@@ -43,6 +44,7 @@ class DeepgramSttStream:
         keepalive_interval_s: float = 3.0,
         monotonic: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        benchmark_observer: SttBenchmarkObserver | None = None,
     ) -> None:
         self._api_key = api_key
         self._model = model
@@ -52,6 +54,7 @@ class DeepgramSttStream:
         self._keepalive_interval_s = keepalive_interval_s
         self._monotonic = monotonic
         self._sleep = sleep
+        self._benchmark_observer = benchmark_observer
         self._websocket: UpstreamWebSocket | None = None
         self._reader_task: asyncio.Task[None] | None = None
         self._keepalive_task: asyncio.Task[None] | None = None
@@ -66,6 +69,12 @@ class DeepgramSttStream:
         self._send_lock = asyncio.Lock()
         self._last_outbound_at: float | None = None
         self._failure_reported = False
+
+    def set_stt_benchmark_observer(
+        self,
+        observer: SttBenchmarkObserver,
+    ) -> None:
+        self._benchmark_observer = observer
 
     async def start(self, audio: AudioConfig, language: Literal["vi"]) -> None:
         query = urlencode(
@@ -184,6 +193,8 @@ class DeepgramSttStream:
                     if websocket is None:
                         return
                     await websocket.send('{"type":"KeepAlive"}')
+                    if self._benchmark_observer is not None:
+                        self._benchmark_observer.record_keepalive()
                     self._last_outbound_at = self._monotonic()
         except asyncio.CancelledError:
             raise

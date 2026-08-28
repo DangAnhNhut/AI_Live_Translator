@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     deepgram_model: str = "nova-3"
     deepgram_language: Literal["vi"] = "vi"
     deepgram_endpointing_ms: int = 300
+    stt_benchmark: bool = False
 
     model_config = SettingsConfigDict(
         env_file=".env",

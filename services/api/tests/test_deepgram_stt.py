@@ -544,6 +544,49 @@ def test_idle_stream_sends_periodic_exact_text_keepalive_frames():
     assert all(delay == 3.0 for delay in clock.delays)
 
 
+def test_successful_keepalives_are_observed_without_changing_frames():
+    from app.benchmark.stt_benchmark import create_stt_benchmark_recorder
+
+    clock = ControlledClock()
+    websocket = FakeDeepgramWebSocket()
+    lines: list[str] = []
+    recorder = create_stt_benchmark_recorder(
+        enabled=True,
+        monotonic=clock.monotonic,
+        sink=lines.append,
+    )
+    assert recorder is not None
+    stream = DeepgramSttStream(
+        api_key=SecretStr("test-deepgram-key"),
+        model="nova-3",
+        language="vi",
+        endpointing_ms=300,
+        connector=RecordingConnector(websocket),
+        keepalive_interval_s=3.0,
+        monotonic=clock.monotonic,
+        sleep=clock.sleep,
+        benchmark_observer=recorder,
+    )
+
+    async def exercise() -> None:
+        await stream.start(valid_audio(), "vi")
+        await clock.advance(3.0)
+        await wait_until(lambda: len(websocket.sent) == 1)
+        await clock.advance(3.0)
+        await wait_until(lambda: len(websocket.sent) == 2)
+        await stream.close()
+
+    asyncio.run(exercise())
+    recorder.finish("client_disconnect")
+
+    summary = json.loads(lines[-1].removeprefix("STT_BENCHMARK "))
+    assert websocket.sent == [
+        '{"type":"KeepAlive"}',
+        '{"type":"KeepAlive"}',
+    ]
+    assert summary["keepalive_count"] == 2
+
+
 def test_active_audio_postpones_keepalive_until_stream_becomes_idle():
     clock = ControlledClock()
     websocket = FakeDeepgramWebSocket()
