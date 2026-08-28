@@ -1,0 +1,63 @@
+# Runtime WebSocket / STT Verification
+
+## WebSocket Echo
+
+Endpoint:
+ws://127.0.0.1:8000/ws/test
+
+Result:
+
+[WS TEST] CONNECTED
+[WS TEST] SEND: Xin chao tu Task 5 runtime verification
+[WS TEST] RECEIVE: Xin chao tu Task 5 runtime verification
+[WS TEST] ECHO VERIFIED
+[WS TEST] DISCONNECTED
+
+Status: PASS
+
+---
+
+## STT WebSocket Runtime
+
+Endpoint:
+ws://127.0.0.1:8000/ws/stt
+
+Start payload:
+
+{
+  "type": "stt.start",
+  "audio": {
+    "encoding": "pcm_s16le",
+    "sample_rate_hz": 16000,
+    "channels": 1
+  },
+  "language": "vi"
+}
+
+Runtime response:
+
+{"type":"stt.error","code":"provider_unavailable","message":"STT provider is unavailable.","recoverable":false}
+
+{"type":"stt.closed"}
+
+Status:
+
+PASS - STT WebSocket protocol/error path verified at runtime.
+
+Note:
+
+The real STT provider is intentionally not configured yet.
+Real microphone audio -> transcript is therefore NOT VERIFIED.
+
+---
+
+## Backend Runtime
+
+Uvicorn:
+http://127.0.0.1:8000
+
+Observed:
+
+WebSocket /ws/test accepted
+WebSocket /ws/stt accepted
+connection open

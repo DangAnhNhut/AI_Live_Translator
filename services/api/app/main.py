@@ -3,7 +3,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.health import router as health_router
 from app.core.config import settings
-from app.realtime.test_socket import router as websocket_router
+from app.realtime.stt_socket import router as stt_websocket_router
+from app.realtime.test_socket import router as test_websocket_router
 
 
 app = FastAPI(
@@ -25,7 +26,8 @@ app.add_middleware(
 
 
 app.include_router(health_router)
-app.include_router(websocket_router)
+app.include_router(test_websocket_router)
+app.include_router(stt_websocket_router)
 
 
 @app.get("/")

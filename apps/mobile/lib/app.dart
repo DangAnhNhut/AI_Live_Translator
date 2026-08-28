@@ -1,18 +1,52 @@
 import 'package:flutter/material.dart';
 
-import 'screens/mobile_technical_test_screen.dart';
-import 'services/backend_health_service.dart';
-import 'services/realtime_websocket_service.dart';
+import 'benchmark/stt_benchmark.dart';
+import 'screens/live_session_screen.dart';
+import 'services/debug_stt_session_transport.dart';
+import 'services/microphone_capture_service.dart';
+import 'services/microphone_permission_service.dart';
+import 'services/stt_websocket_service.dart';
+import 'session/live_session_controller.dart';
 
-class AiLiveTranslatorApp extends StatelessWidget {
+class AiLiveTranslatorApp extends StatefulWidget {
   const AiLiveTranslatorApp({
     super.key,
-    required this.healthService,
-    required this.realtimeService,
+    required this.permissionGateway,
+    required this.sessionTransport,
+    required this.microphoneCapture,
+    this.debugControls,
+    this.benchmark = const DisabledLiveSessionBenchmark(),
   });
 
-  final BackendHealthService healthService;
-  final RealtimeWebSocketService realtimeService;
+  final MicrophonePermissionGateway permissionGateway;
+  final SttSessionTransport sessionTransport;
+  final MobileMicrophoneCapture microphoneCapture;
+  final DebugSttSessionControls? debugControls;
+  final LiveSessionBenchmark benchmark;
+
+  @override
+  State<AiLiveTranslatorApp> createState() => _AiLiveTranslatorAppState();
+}
+
+class _AiLiveTranslatorAppState extends State<AiLiveTranslatorApp> {
+  late final LiveSessionController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = LiveSessionController(
+      permissionGateway: widget.permissionGateway,
+      transport: widget.sessionTransport,
+      microphoneCapture: widget.microphoneCapture,
+      benchmark: widget.benchmark,
+    );
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -23,9 +57,9 @@ class AiLiveTranslatorApp extends StatelessWidget {
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
         useMaterial3: true,
       ),
-      home: MobileTechnicalTestScreen(
-        healthService: healthService,
-        realtimeService: realtimeService,
+      home: LiveSessionScreen(
+        controller: _controller,
+        debugControls: widget.debugControls,
       ),
     );
   }
