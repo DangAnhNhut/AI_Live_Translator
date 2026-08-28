@@ -1,5 +1,6 @@
 import asyncio
 import json
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import suppress
 from typing import Any, Literal, Protocol
@@ -39,14 +40,21 @@ class DeepgramSttStream:
         language: Literal["vi"],
         endpointing_ms: int,
         connector: UpstreamConnector = _connect_upstream,
+        keepalive_interval_s: float = 3.0,
+        monotonic: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self._api_key = api_key
         self._model = model
         self._language = language
         self._endpointing_ms = endpointing_ms
         self._connector = connector
+        self._keepalive_interval_s = keepalive_interval_s
+        self._monotonic = monotonic
+        self._sleep = sleep
         self._websocket: UpstreamWebSocket | None = None
         self._reader_task: asyncio.Task[None] | None = None
+        self._keepalive_task: asyncio.Task[None] | None = None
         self._events: asyncio.Queue[
             SttTranscript | ProviderStreamError | object
         ] = asyncio.Queue()
@@ -55,6 +63,9 @@ class DeepgramSttStream:
         self._finishing = False
         self._finish_started = False
         self._finish_lock = asyncio.Lock()
+        self._send_lock = asyncio.Lock()
+        self._last_outbound_at: float | None = None
+        self._failure_reported = False
 
     async def start(self, audio: AudioConfig, language: Literal["vi"]) -> None:
         query = urlencode(
@@ -83,16 +94,24 @@ class DeepgramSttStream:
             raise ProviderStreamError(
                 "Deepgram upstream connection failed"
             ) from None
+        self._last_outbound_at = self._monotonic()
         self._reader_task = asyncio.create_task(self._read_upstream())
+        self._keepalive_task = asyncio.create_task(self._send_keepalives())
 
     async def send_audio(self, chunk: bytes) -> None:
-        websocket = self._websocket
-        if websocket is None:
-            raise ProviderStreamError("Deepgram upstream stream failed")
         try:
-            await websocket.send(chunk)
+            async with self._send_lock:
+                websocket = self._websocket
+                if websocket is None:
+                    raise ProviderStreamError(
+                        "Deepgram upstream stream failed"
+                    )
+                await websocket.send(chunk)
+                self._last_outbound_at = self._monotonic()
         except asyncio.CancelledError:
             await self._shutdown()
+            raise
+        except ProviderStreamError:
             raise
         except Exception:
             await self._shutdown()
@@ -104,14 +123,24 @@ class DeepgramSttStream:
                 return
             self._finish_started = True
             self._finishing = True
-            websocket = self._websocket
-            if websocket is None:
-                raise ProviderStreamError("Deepgram upstream stream failed")
             try:
-                await websocket.send('{"type":"CloseStream"}')
+                async with self._send_lock:
+                    keepalive_task = self._cancel_keepalive()
+                    try:
+                        websocket = self._websocket
+                        if websocket is None or self._closed:
+                            raise ProviderStreamError(
+                                "Deepgram upstream stream failed"
+                            )
+                        await websocket.send('{"type":"CloseStream"}')
+                    finally:
+                        await self._await_keepalive(keepalive_task)
                 if self._reader_task is not None:
                     await self._reader_task
             except asyncio.CancelledError:
+                await self._shutdown(discard_events=True)
+                raise
+            except ProviderStreamError:
                 await self._shutdown(discard_events=True)
                 raise
             except Exception:
@@ -134,6 +163,34 @@ class DeepgramSttStream:
 
     async def close(self) -> None:
         await self._shutdown()
+
+    async def _send_keepalives(self) -> None:
+        assert self._last_outbound_at is not None
+        try:
+            while not self._closed and not self._finishing:
+                idle_for = self._monotonic() - self._last_outbound_at
+                await self._sleep(
+                    max(0.0, self._keepalive_interval_s - idle_for)
+                )
+                if self._closed or self._finishing:
+                    return
+                async with self._send_lock:
+                    if self._closed or self._finishing:
+                        return
+                    idle_for = self._monotonic() - self._last_outbound_at
+                    if idle_for < self._keepalive_interval_s:
+                        continue
+                    websocket = self._websocket
+                    if websocket is None:
+                        return
+                    await websocket.send('{"type":"KeepAlive"}')
+                    self._last_outbound_at = self._monotonic()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self._closed = True
+            await self._report_stream_failure()
+            await self._close_socket()
 
     async def _read_upstream(self) -> None:
         assert self._websocket is not None
@@ -171,22 +228,21 @@ class DeepgramSttStream:
             raise
         except Exception:
             self._closed = True
+            await self._stop_keepalive()
             await self._close_socket()
-            await self._events.put(
-                ProviderStreamError("Deepgram upstream stream failed")
-            )
+            await self._report_stream_failure()
         else:
             if not self._finishing and not self._closed:
                 self._closed = True
+                await self._stop_keepalive()
                 await self._close_socket()
-                await self._events.put(
-                    ProviderStreamError("Deepgram upstream stream failed")
-                )
+                await self._report_stream_failure()
         finally:
             await self._events.put(_EVENTS_CLOSED)
 
     async def _shutdown(self, *, discard_events: bool = True) -> None:
         self._closed = True
+        await self._stop_keepalive()
         reader_task = self._reader_task
         self._reader_task = None
         current_task = asyncio.current_task()
@@ -207,6 +263,37 @@ class DeepgramSttStream:
                 except asyncio.QueueEmpty:
                     break
             await self._events.put(_EVENTS_CLOSED)
+
+    async def _stop_keepalive(self) -> None:
+        await self._await_keepalive(self._cancel_keepalive())
+
+    def _cancel_keepalive(self) -> asyncio.Task[None] | None:
+        keepalive_task = self._keepalive_task
+        self._keepalive_task = None
+        current_task = asyncio.current_task()
+        if (
+            keepalive_task is not None
+            and keepalive_task is not current_task
+            and not keepalive_task.done()
+        ):
+            keepalive_task.cancel()
+        return keepalive_task
+
+    async def _await_keepalive(
+        self,
+        keepalive_task: asyncio.Task[None] | None,
+    ) -> None:
+        current_task = asyncio.current_task()
+        if keepalive_task is not None and keepalive_task is not current_task:
+            await asyncio.gather(keepalive_task, return_exceptions=True)
+
+    async def _report_stream_failure(self) -> None:
+        if self._failure_reported:
+            return
+        self._failure_reported = True
+        await self._events.put(
+            ProviderStreamError("Deepgram upstream stream failed")
+        )
 
     async def _close_socket(self) -> None:
         websocket = self._websocket

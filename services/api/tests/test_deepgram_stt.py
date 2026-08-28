@@ -19,6 +19,7 @@ class FakeDeepgramWebSocket:
         send_error: Exception | None = None,
         close_stream_messages: tuple[str, ...] = (),
         close_on_close_stream: bool = True,
+        keepalive_send_error: Exception | None = None,
     ) -> None:
         self.incoming: asyncio.Queue[object] = asyncio.Queue()
         self.sent: list[str | bytes] = []
@@ -26,6 +27,7 @@ class FakeDeepgramWebSocket:
         self.send_error = send_error
         self.close_stream_messages = close_stream_messages
         self.close_on_close_stream = close_on_close_stream
+        self.keepalive_send_error = keepalive_send_error
         self.message_received = asyncio.Event()
         self.iteration_cancelled = asyncio.Event()
 
@@ -46,6 +48,8 @@ class FakeDeepgramWebSocket:
         return message
 
     async def send(self, message: str | bytes) -> None:
+        if message == '{"type":"KeepAlive"}' and self.keepalive_send_error:
+            raise self.keepalive_send_error
         if self.send_error is not None:
             raise self.send_error
         self.sent.append(message)
@@ -57,6 +61,65 @@ class FakeDeepgramWebSocket:
     async def close(self) -> None:
         self.close_calls += 1
         await self.incoming.put(_UPSTREAM_CLOSED)
+
+
+class BlockingSendWebSocket(FakeDeepgramWebSocket):
+    def __init__(self, blocked_message: str | bytes) -> None:
+        super().__init__()
+        self.blocked_message = blocked_message
+        self.send_entered = asyncio.Event()
+        self.release_send = asyncio.Event()
+        self.active_sends = 0
+        self.maximum_active_sends = 0
+
+    async def send(self, message: str | bytes) -> None:
+        self.active_sends += 1
+        self.maximum_active_sends = max(
+            self.maximum_active_sends,
+            self.active_sends,
+        )
+        try:
+            if message == self.blocked_message:
+                self.send_entered.set()
+                await self.release_send.wait()
+            await super().send(message)
+        finally:
+            self.active_sends -= 1
+
+
+class ControlledClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.delays: list[float] = []
+        self.sleepers = 0
+        self._ticks: asyncio.Queue[None] = asyncio.Queue()
+
+    def monotonic(self) -> float:
+        return self.now
+
+    async def sleep(self, delay: float) -> None:
+        self.delays.append(delay)
+        self.sleepers += 1
+        try:
+            await self._ticks.get()
+        finally:
+            self.sleepers -= 1
+
+    def elapse(self, seconds: float) -> None:
+        self.now += seconds
+
+    async def advance(self, seconds: float) -> None:
+        await wait_until(lambda: self.sleepers == 1)
+        self.elapse(seconds)
+        await self._ticks.put(None)
+
+
+async def wait_until(predicate) -> None:
+    async def poll() -> None:
+        while not predicate():
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(poll(), timeout=0.5)
 
 
 class RecordingConnector:
@@ -77,13 +140,27 @@ class FailingConnector:
         raise self.error
 
 
-def make_stream(connector: RecordingConnector) -> DeepgramSttStream:
+def make_stream(
+    connector: RecordingConnector,
+    *,
+    clock: ControlledClock | None = None,
+) -> DeepgramSttStream:
+    timing = (
+        {}
+        if clock is None
+        else {
+            "keepalive_interval_s": 3.0,
+            "monotonic": clock.monotonic,
+            "sleep": clock.sleep,
+        }
+    )
     return DeepgramSttStream(
         api_key=SecretStr("test-deepgram-key"),
         model="nova-3",
         language="vi",
         endpointing_ms=300,
         connector=connector,
+        **timing,
     )
 
 
@@ -438,3 +515,215 @@ def test_unexpected_upstream_close_is_normalized_provider_failure():
 
     assert message == "Deepgram upstream stream failed"
     assert websocket.close_calls == 1
+
+
+def test_idle_stream_sends_periodic_exact_text_keepalive_frames():
+    clock = ControlledClock()
+    websocket = FakeDeepgramWebSocket()
+    stream = make_stream(RecordingConnector(websocket), clock=clock)
+
+    async def exercise() -> None:
+        await stream.start(valid_audio(), "vi")
+        await clock.advance(3.0)
+        await wait_until(lambda: len(websocket.sent) == 1)
+        await clock.advance(3.0)
+        await wait_until(lambda: len(websocket.sent) == 2)
+        await stream.close()
+
+    asyncio.run(exercise())
+
+    assert websocket.sent == [
+        '{"type":"KeepAlive"}',
+        '{"type":"KeepAlive"}',
+    ]
+    assert all(isinstance(message, str) for message in websocket.sent)
+    assert all(
+        json.loads(message) == {"type": "KeepAlive"}
+        for message in websocket.sent
+    )
+    assert all(delay == 3.0 for delay in clock.delays)
+
+
+def test_active_audio_postpones_keepalive_until_stream_becomes_idle():
+    clock = ControlledClock()
+    websocket = FakeDeepgramWebSocket()
+    stream = make_stream(RecordingConnector(websocket), clock=clock)
+    first_chunk = b"\x00\x01"
+    second_chunk = b"\x02\x03"
+
+    async def exercise() -> None:
+        await stream.start(valid_audio(), "vi")
+        await wait_until(lambda: clock.sleepers == 1)
+        clock.elapse(2.0)
+        await stream.send_audio(first_chunk)
+        await clock.advance(1.0)
+        await wait_until(lambda: clock.sleepers == 1)
+        clock.elapse(2.0)
+        await stream.send_audio(second_chunk)
+        await clock.advance(1.0)
+        await wait_until(lambda: clock.sleepers == 1)
+        assert websocket.sent == [first_chunk, second_chunk]
+        await clock.advance(3.0)
+        await wait_until(lambda: len(websocket.sent) == 3)
+        await stream.close()
+
+    asyncio.run(exercise())
+
+    assert websocket.sent == [
+        first_chunk,
+        second_chunk,
+        '{"type":"KeepAlive"}',
+    ]
+
+
+def test_finish_input_stops_keepalive_before_close_stream():
+    clock = ControlledClock()
+    websocket = FakeDeepgramWebSocket()
+    stream = make_stream(RecordingConnector(websocket), clock=clock)
+
+    async def exercise() -> None:
+        await stream.start(valid_audio(), "vi")
+        await wait_until(lambda: clock.sleepers == 1)
+        await stream.finish_input()
+        clock.elapse(30.0)
+        await asyncio.sleep(0)
+
+    asyncio.run(exercise())
+
+    assert websocket.sent == ['{"type":"CloseStream"}']
+    assert clock.sleepers == 0
+
+
+def test_close_stops_keepalive_without_later_emission():
+    clock = ControlledClock()
+    websocket = FakeDeepgramWebSocket()
+    stream = make_stream(RecordingConnector(websocket), clock=clock)
+
+    async def exercise() -> None:
+        await stream.start(valid_audio(), "vi")
+        await wait_until(lambda: clock.sleepers == 1)
+        await stream.close()
+        clock.elapse(30.0)
+        await asyncio.sleep(0)
+
+    asyncio.run(exercise())
+
+    assert websocket.sent == []
+    assert clock.sleepers == 0
+
+
+def test_unexpected_upstream_failure_stops_keepalive():
+    clock = ControlledClock()
+    websocket = FakeDeepgramWebSocket()
+    stream = make_stream(RecordingConnector(websocket), clock=clock)
+
+    async def exercise() -> str:
+        await stream.start(valid_audio(), "vi")
+        await wait_until(lambda: clock.sleepers == 1)
+        await websocket.incoming.put(RuntimeError("raw reader detail"))
+        with pytest.raises(ProviderStreamError) as error:
+            await asyncio.wait_for(anext(stream.events()), timeout=0.5)
+        clock.elapse(30.0)
+        await asyncio.sleep(0)
+        await stream.close()
+        return str(error.value)
+
+    message = asyncio.run(exercise())
+
+    assert message == "Deepgram upstream stream failed"
+    assert websocket.sent == []
+    assert clock.sleepers == 0
+
+
+def test_keepalive_send_failure_is_sanitized_provider_error():
+    api_key = "test-deepgram-key"
+    raw_detail = f"keepalive rejected Authorization Token {api_key}"
+    clock = ControlledClock()
+    websocket = FakeDeepgramWebSocket(
+        keepalive_send_error=RuntimeError(raw_detail)
+    )
+    stream = make_stream(RecordingConnector(websocket), clock=clock)
+
+    async def exercise() -> str:
+        await stream.start(valid_audio(), "vi")
+        events = stream.events()
+        await clock.advance(3.0)
+        with pytest.raises(ProviderStreamError) as error:
+            await asyncio.wait_for(anext(events), timeout=0.5)
+        await stream.close()
+        return str(error.value)
+
+    message = asyncio.run(exercise())
+
+    assert message == "Deepgram upstream stream failed"
+    assert api_key not in message
+    assert "Authorization" not in message
+    assert "keepalive rejected" not in message
+
+
+def test_keepalive_and_audio_sends_do_not_overlap():
+    clock = ControlledClock()
+    websocket = BlockingSendWebSocket('{"type":"KeepAlive"}')
+    stream = make_stream(RecordingConnector(websocket), clock=clock)
+    chunk = b"\x00\x01"
+
+    async def exercise() -> None:
+        await stream.start(valid_audio(), "vi")
+        await clock.advance(3.0)
+        await asyncio.wait_for(websocket.send_entered.wait(), timeout=0.5)
+        audio_task = asyncio.create_task(stream.send_audio(chunk))
+        await asyncio.sleep(0)
+        assert not audio_task.done()
+        websocket.release_send.set()
+        await asyncio.wait_for(audio_task, timeout=0.5)
+        await stream.close()
+
+    asyncio.run(exercise())
+
+    assert websocket.maximum_active_sends == 1
+    assert websocket.sent == ['{"type":"KeepAlive"}', chunk]
+
+
+def test_keepalive_cannot_be_emitted_after_close_stream_send_begins():
+    clock = ControlledClock()
+    websocket = BlockingSendWebSocket('{"type":"CloseStream"}')
+    stream = make_stream(RecordingConnector(websocket), clock=clock)
+
+    async def exercise() -> None:
+        await stream.start(valid_audio(), "vi")
+        await wait_until(lambda: clock.sleepers == 1)
+        finish_task = asyncio.create_task(stream.finish_input())
+        await asyncio.wait_for(websocket.send_entered.wait(), timeout=0.5)
+        clock.elapse(30.0)
+        await asyncio.sleep(0)
+        websocket.release_send.set()
+        await asyncio.wait_for(finish_task, timeout=0.5)
+
+    asyncio.run(exercise())
+
+    assert websocket.sent == ['{"type":"CloseStream"}']
+    assert websocket.maximum_active_sends == 1
+    assert clock.sleepers == 0
+
+
+def test_connect_failure_does_not_start_keepalive_lifecycle():
+    clock = ControlledClock()
+    stream = DeepgramSttStream(
+        api_key=SecretStr("test-deepgram-key"),
+        model="nova-3",
+        language="vi",
+        endpointing_ms=300,
+        connector=FailingConnector(RuntimeError("connection failed")),
+        keepalive_interval_s=3.0,
+        monotonic=clock.monotonic,
+        sleep=clock.sleep,
+    )
+
+    async def exercise() -> None:
+        with pytest.raises(ProviderStreamError):
+            await stream.start(valid_audio(), "vi")
+        await asyncio.sleep(0)
+
+    asyncio.run(exercise())
+
+    assert clock.delays == []
