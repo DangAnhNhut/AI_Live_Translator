@@ -176,7 +176,7 @@ void main() {
     expect(eventsNamed(sink, 'speech_onset'), hasLength(2));
   });
 
-  test('short pause with no PCM does not create a false onset', () {
+  test('resume makes the next speech a fresh utterance after any pause', () {
     final clock = FakeBenchmarkClock();
     final sink = CapturingBenchmarkSink();
     final recorder = enabledRecorder(clock: clock, sink: sink);
@@ -188,7 +188,89 @@ void main() {
     recorder.resumed();
     recorder.recordOutgoingPcm(pcmChunk(2000));
 
-    expect(eventsNamed(sink, 'speech_onset'), hasLength(1));
+    expect(eventsNamed(sink, 'speech_onset'), hasLength(2));
+  });
+
+  test('pause retires a pending assigned utterance', () {
+    final clock = FakeBenchmarkClock();
+    final sink = CapturingBenchmarkSink();
+    final recorder = enabledRecorder(clock: clock, sink: sink);
+    recorder.sessionStartRequested();
+    establishSpeechOnset(recorder, clock);
+    clock.advance(const Duration(milliseconds: 10));
+    recorder.recordTranscriptReceived(
+      kind: SttBenchmarkTranscriptKind.interim,
+      segmentId: 'segment-before-pause',
+    );
+
+    recorder.paused();
+    clock.advance(const Duration(seconds: 15));
+    recorder.recordTranscriptReceived(
+      kind: SttBenchmarkTranscriptKind.finalResult,
+      segmentId: 'segment-before-pause',
+    );
+
+    expect(eventsNamed(sink, 'speech_to_first_final'), isEmpty);
+    expect(eventsNamed(sink, 'utterance_complete'), isEmpty);
+  });
+
+  test(
+    'delayed unassigned result after pause is not attached to resumed speech',
+    () {
+      final clock = FakeBenchmarkClock();
+      final sink = CapturingBenchmarkSink();
+      final recorder = enabledRecorder(clock: clock, sink: sink);
+      recorder.sessionStartRequested();
+      establishSpeechOnset(recorder, clock);
+
+      recorder.paused();
+      clock.advance(const Duration(seconds: 15));
+      recorder.resumed();
+      recorder.recordOutgoingPcm(pcmChunk(2000));
+      clock.advance(const Duration(milliseconds: 10));
+      recorder.recordTranscriptReceived(
+        kind: SttBenchmarkTranscriptKind.interim,
+        segmentId: 'delayed-segment-a',
+      );
+      clock.advance(const Duration(milliseconds: 5));
+      recorder.recordTranscriptReceived(
+        kind: SttBenchmarkTranscriptKind.interim,
+        segmentId: 'segment-b',
+      );
+
+      final metrics = eventsNamed(sink, 'speech_to_first_interim');
+      expect(metrics, hasLength(1));
+      expect(metrics.single['utterance_id'], 2);
+      expect(metrics.single['speech_to_first_interim_ms'], 15);
+    },
+  );
+
+  test('ambiguous result after pause produces no contaminated latency', () {
+    final clock = FakeBenchmarkClock();
+    final sink = CapturingBenchmarkSink();
+    final recorder = enabledRecorder(clock: clock, sink: sink);
+    recorder.sessionStartRequested();
+    establishSpeechOnset(recorder, clock);
+
+    recorder.paused();
+    clock.advance(const Duration(milliseconds: 14500));
+    recorder.resumed();
+    recorder.recordOutgoingPcm(pcmChunk(2000));
+    clock.advance(const Duration(milliseconds: 25));
+    recorder.recordTranscriptReceived(
+      kind: SttBenchmarkTranscriptKind.finalResult,
+      segmentId: 'segment-after-pause',
+    );
+    recorder.stopped();
+
+    final summary = eventsNamed(sink, 'summary').single;
+    expect(summary['speech_to_first_final_ms'], {
+      'count': 0,
+      'min': null,
+      'median': null,
+      'p95': null,
+      'max': null,
+    });
   });
 
   test('long reconnect gap with no PCM re-arms speech onset', () {

@@ -1,3 +1,5 @@
+import 'stt_session_id.dart';
+
 class AppConfig {
   static const String apiBaseUrl = String.fromEnvironment(
     'API_BASE_URL',
@@ -15,4 +17,13 @@ class AppConfig {
     'STT_BENCHMARK',
     defaultValue: false,
   );
+  static const bool sttTranscriptTrace = bool.fromEnvironment(
+    'STT_TRANSCRIPT_TRACE',
+    defaultValue: false,
+  );
+  static const String _rawSttSessionId = String.fromEnvironment(
+    'STT_SESSION_ID',
+    defaultValue: '',
+  );
+  static final String? sttSessionId = normalizeSttSessionId(_rawSttSessionId);
 }

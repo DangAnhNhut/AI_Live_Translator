@@ -2,18 +2,36 @@ import json
 from enum import Enum
 from typing import Literal, TypeAlias
 
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 
 ErrorCode: TypeAlias = Literal[
     "invalid_message",
     "invalid_state",
     "unsupported_audio",
+    "session_producer_conflict",
     "provider_unavailable",
     "provider_error",
     "internal_error",
 ]
 TranscriptKind: TypeAlias = Literal["interim", "final"]
+TargetLanguage: TypeAlias = Literal[
+    "en",
+    "ja",
+    "ko",
+    "zh-CN",
+    "th",
+    "fr",
+    "de",
+    "es",
+]
 
 
 class AudioConfig(BaseModel):
@@ -24,12 +42,46 @@ class AudioConfig(BaseModel):
     channels: Literal[1]
 
 
+class TranslationConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target_language: TargetLanguage
+
+
+class TtsConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = Field(strict=True)
+    voice: str | None = Field(default=None, min_length=1, max_length=128)
+
+    @field_validator("voice")
+    @classmethod
+    def reject_blank_voice(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("voice must not be blank")
+        return value
+
+
 class SttStart(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     type: Literal["stt.start"]
     audio: AudioConfig
     language: Literal["vi"]
+    session_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
+    )
+    translation: TranslationConfig | None = None
+    tts: TtsConfig | None = None
+
+    @model_validator(mode="after")
+    def require_translation_for_enabled_tts(self) -> "SttStart":
+        if self.tts is not None and self.tts.enabled and self.translation is None:
+            raise ValueError("enabled TTS requires translation")
+        return self
 
 
 class SttStop(BaseModel):
@@ -68,17 +120,38 @@ def parse_control_message(text: str) -> ControlMessage:
     if message_type != "stt.start":
         raise ProtocolViolation("invalid_message", "Unknown control message type.")
 
-    if set(payload) != {"type", "audio", "language"} or payload.get("language") != "vi":
+    required_fields = {"type", "audio", "language"}
+    allowed_fields = required_fields | {"session_id", "translation", "tts"}
+    if (
+        not required_fields.issubset(payload)
+        or not set(payload).issubset(allowed_fields)
+        or payload.get("language") != "vi"
+        or ("session_id" in payload and payload["session_id"] is None)
+        or ("translation" in payload and payload["translation"] is None)
+        or ("tts" in payload and payload["tts"] is None)
+    ):
         raise ProtocolViolation("invalid_message", "Invalid stt.start message.")
 
     try:
         return SttStart.model_validate(payload)
     except ValidationError as exc:
+        if any(
+            not error["loc"]
+            or error["loc"][:1]
+            in (("session_id",), ("translation",), ("tts",))
+            for error in exc.errors()
+        ):
+            raise ProtocolViolation(
+                "invalid_message", "Invalid stt.start message."
+            ) from exc
         raise ProtocolViolation("unsupported_audio", "Unsupported audio declaration.") from exc
 
 
-def ready_event() -> dict[str, object]:
-    return {"type": "stt.ready"}
+def ready_event(*, stream_id: str | None = None) -> dict[str, object]:
+    event: dict[str, object] = {"type": "stt.ready"}
+    if stream_id is not None:
+        event["stream_id"] = stream_id
+    return event
 
 
 def transcript_event(
@@ -86,13 +159,18 @@ def transcript_event(
     segment_id: str,
     text: str,
     language: Literal["vi"] = "vi",
+    *,
+    stream_id: str | None = None,
 ) -> dict[str, object]:
-    return {
+    event: dict[str, object] = {
         "type": f"transcript.{kind}",
         "segment_id": segment_id,
         "text": text,
         "language": language,
     }
+    if stream_id is not None:
+        event["stream_id"] = stream_id
+    return event
 
 
 def error_event(code: ErrorCode, message: str) -> dict[str, object]:

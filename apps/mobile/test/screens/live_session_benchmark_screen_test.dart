@@ -26,7 +26,9 @@ class ScreenBenchmarkTransport implements SttSessionTransport {
   Stream<SttSessionEvent> get events => eventController.stream;
 
   @override
-  Future<void> connect() async {}
+  Future<void> connect({
+    SttSessionStartOptions options = const SttSessionStartOptions(),
+  }) async {}
 
   @override
   Future<void> disconnect() async {}

@@ -7,6 +7,10 @@ from pydantic import SecretStr
 from app.ai.stt import ProviderStreamError
 from app.ai.deepgram import DeepgramSttStream
 from app.realtime.stt_protocol import AudioConfig
+from app.realtime.stt_transcript_trace import (
+    SttTranscriptTraceRecorder,
+    create_stt_transcript_trace,
+)
 
 
 _UPSTREAM_CLOSED = object()
@@ -144,6 +148,7 @@ def make_stream(
     connector: RecordingConnector,
     *,
     clock: ControlledClock | None = None,
+    transcript_trace: SttTranscriptTraceRecorder | None = None,
 ) -> DeepgramSttStream:
     timing = (
         {}
@@ -154,7 +159,7 @@ def make_stream(
             "sleep": clock.sleep,
         }
     )
-    return DeepgramSttStream(
+    stream = DeepgramSttStream(
         api_key=SecretStr("test-deepgram-key"),
         model="nova-3",
         language="vi",
@@ -162,6 +167,9 @@ def make_stream(
         connector=connector,
         **timing,
     )
+    if transcript_trace is not None:
+        stream.set_stt_transcript_trace(transcript_trace)
+    return stream
 
 
 def valid_audio() -> AudioConfig:
@@ -275,6 +283,32 @@ def test_results_map_to_ordered_interim_and_final_transcripts():
     assert [event.language for event in received] == ["vi", "vi", "vi"]
 
 
+def test_speech_final_maps_to_provider_neutral_utterance_boundary():
+    websocket = FakeDeepgramWebSocket()
+    stream = make_stream(RecordingConnector(websocket))
+
+    async def exercise():
+        await stream.start(valid_audio(), "vi")
+        events = stream.events()
+        await websocket.incoming.put(
+            results_message("chưa xong", is_final=True, speech_final=False)
+        )
+        await websocket.incoming.put(
+            results_message("đã xong", is_final=True, speech_final=True)
+        )
+        received = [
+            await asyncio.wait_for(anext(events), timeout=0.5)
+            for _ in range(2)
+        ]
+        await stream.close()
+        return received
+
+    received = asyncio.run(exercise())
+
+    assert getattr(received[0], "utterance_boundary", None) is False
+    assert getattr(received[1], "utterance_boundary", None) is True
+
+
 def test_empty_final_result_is_ignored_without_advancing_segment():
     websocket = FakeDeepgramWebSocket()
     connector = RecordingConnector(websocket)
@@ -294,6 +328,45 @@ def test_empty_final_result_is_ignored_without_advancing_segment():
     assert event.kind == "interim"
     assert event.segment_id == "seg_001"
     assert event.text == "xin chào"
+
+
+def test_provider_trace_includes_empty_result_and_safe_segment_metadata():
+    websocket = FakeDeepgramWebSocket()
+    connector = RecordingConnector(websocket)
+    lines: list[str] = []
+    trace = create_stt_transcript_trace(enabled=True, sink=lines.append)
+    assert trace is not None
+    stream = make_stream(connector, transcript_trace=trace)
+
+    async def exercise():
+        await stream.start(valid_audio(), "vi")
+        events = stream.events()
+        await websocket.incoming.put(results_message("", is_final=True))
+        await websocket.incoming.put(results_message("xin", is_final=False))
+        event = await asyncio.wait_for(anext(events), timeout=0.5)
+        await stream.close()
+        return event
+
+    event = asyncio.run(exercise())
+    payloads = [
+        json.loads(line.removeprefix("STT_TRANSCRIPT_TRACE "))
+        for line in lines
+    ]
+
+    assert event.segment_id == "seg_001"
+    assert [payload["provider_sequence"] for payload in payloads] == [1, 2]
+    assert [payload["kind"] for payload in payloads] == ["final", "interim"]
+    assert [payload["text"] for payload in payloads] == ["", "xin"]
+    assert payloads[0]["text_length"] == 0
+    assert payloads[0]["language"] == "vi"
+    assert payloads[0]["provider_segment_metadata"] == {
+        "normalized_segment_id": "seg_001",
+        "channel_index": [0, 1],
+        "duration": 0.8,
+        "start": 0.0,
+        "speech_final": False,
+        "from_finalize": False,
+    }
 
 
 def test_result_with_no_alternatives_is_ignored_safely():

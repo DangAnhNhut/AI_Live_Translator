@@ -3,18 +3,10 @@ import 'dart:typed_data';
 
 import 'package:record/record.dart';
 
+import 'audio_input.dart';
+
 /// Captures raw microphone PCM data for a live session.
-abstract interface class MobileMicrophoneCapture {
-  Future<Stream<Uint8List>> start();
-
-  Future<void> pause();
-
-  Future<void> resume();
-
-  Future<void> stop();
-
-  Future<void> dispose();
-}
+abstract interface class MobileMicrophoneCapture implements MobileAudioInput {}
 
 /// Minimal seam around the platform recorder for deterministic unit tests.
 abstract interface class AudioRecorderDriver {
