@@ -3,46 +3,63 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 
 import '../benchmark/stt_benchmark.dart';
+import '../diagnostics/stt_transcript_trace.dart';
+import '../services/audio_input.dart';
 import '../services/microphone_capture_service.dart';
 import '../services/microphone_permission_service.dart';
 import '../services/stt_websocket_service.dart';
+import '../translation/translation_domain.dart';
+import '../translation/translation_presentation.dart';
 import 'live_session_state.dart';
 import 'session_timer.dart';
 
 typedef RetryDelay = Future<void> Function(Duration duration);
+typedef SystemAudioSupportQuery = Future<bool> Function();
 
 class LiveSessionController extends ChangeNotifier {
   LiveSessionController({
     required MicrophonePermissionGateway permissionGateway,
     required SttSessionTransport transport,
     MobileMicrophoneCapture? microphoneCapture,
+    MobileAudioInput? systemAudioInput,
+    SystemAudioSupportQuery? systemAudioSupportQuery,
     SessionClock? clock,
     SessionTicker? ticker,
     LiveSessionBenchmark? benchmark,
+    this.transcriptTrace = const DisabledSttTranscriptTrace(),
     this.maxReconnectAttempts = 3,
     this.reconnectDelay = const Duration(milliseconds: 500),
+    this.translationEnabled = true,
     RetryDelay? retryDelay,
   }) : _permissionGateway = permissionGateway,
        _transport = transport,
        _microphoneCapture = microphoneCapture ?? DebugNoopMicrophoneCapture(),
+       _systemAudioInput = systemAudioInput,
+       _systemAudioSupportQuery = systemAudioSupportQuery,
        _clock = clock ?? StopwatchSessionClock(),
        _ticker = ticker ?? PeriodicSessionTicker(),
        _benchmark = benchmark ?? const DisabledLiveSessionBenchmark(),
        _retryDelay = retryDelay ?? Future<void>.delayed,
        assert(maxReconnectAttempts > 0) {
     _eventSubscription = _transport.events.listen(_handleTransportEvent);
+    audioSourceSupportReady = _loadSystemAudioSupport();
   }
 
   final MicrophonePermissionGateway _permissionGateway;
   final SttSessionTransport _transport;
   final MobileMicrophoneCapture _microphoneCapture;
+  final MobileAudioInput? _systemAudioInput;
+  final SystemAudioSupportQuery? _systemAudioSupportQuery;
   final SessionClock _clock;
   final SessionTicker _ticker;
   final LiveSessionBenchmark _benchmark;
+  final SttTranscriptTrace transcriptTrace;
   final RetryDelay _retryDelay;
   final int maxReconnectAttempts;
   final Duration reconnectDelay;
+  final bool translationEnabled;
   late final StreamSubscription<SttSessionEvent> _eventSubscription;
+  late final Future<void> audioSourceSupportReady;
   StreamSubscription<Uint8List>? _audioSubscription;
   Future<void>? _audioSendFuture;
 
@@ -54,7 +71,12 @@ class LiveSessionController extends ChangeNotifier {
   bool _restorePausedAfterReconnect = false;
   Duration _accumulatedElapsed = Duration.zero;
   Duration? _listeningStartedAt;
-  final Map<String, String> _transcriptSegments = {};
+  final Map<TranscriptSegmentIdentity, LiveTranscriptSegment>
+  _transcriptSegments = {};
+  TranslationTargetLanguage _selectedTranslationTarget =
+      defaultTranslationTarget;
+  TranslationState _translationState = const TranslationState();
+  String? _activeTranslationStreamId;
   int _operationGeneration = 0;
   int _freshRetryGeneration = 0;
   Future<void>? _stopFuture;
@@ -63,9 +85,15 @@ class LiveSessionController extends ChangeNotifier {
   Future<void>? _microphoneFailureCleanupFuture;
   bool _forwardAudio = false;
   bool _microphonePaused = false;
+  bool _hasStoppedSession = false;
   bool _isDisposed = false;
+  MobileAudioSource _selectedAudioSource = MobileAudioSource.microphone;
+  MobileAudioInput? _activeAudioInput;
+  bool _isSystemAudioSupported = false;
 
   LiveSessionState get state => _state;
+  MobileAudioSource get selectedAudioSource => _selectedAudioSource;
+  bool get isSystemAudioSupported => _isSystemAudioSupported;
   Duration get elapsed =>
       _accumulatedElapsed +
       (_listeningStartedAt == null
@@ -74,11 +102,93 @@ class LiveSessionController extends ChangeNotifier {
   String? get errorMessage => _errorMessage;
   bool get canOpenAppSettings => _canOpenAppSettings;
   bool get canRetry => _canRetry;
-  String get transcript => _transcriptSegments.values.join('\n');
+  bool get hasStoppedSession => _hasStoppedSession;
+  String get transcript =>
+      _transcriptSegments.values.map((segment) => segment.text).join('\n');
+  String get finalTranscript => _transcriptSegments.values
+      .where((segment) => segment.isFinal)
+      .map((segment) => segment.text)
+      .join('\n');
+  TranslationTargetLanguage get selectedTranslationTarget =>
+      _selectedTranslationTarget;
+  TranslationState get translationState => _translationState;
+  TranslationPresentation get translationPresentation =>
+      buildTranslationPresentation(
+        _transcriptSegments.values.toList(growable: false),
+        _translationState.utterances,
+      );
+  bool get usesBilingualPresentation =>
+      translationEnabled ||
+      _translationState.configurations.isNotEmpty ||
+      _translationState.utterances.isNotEmpty ||
+      _translationState.sessionErrors.isNotEmpty;
+  String? get translationWarning {
+    final activeStreamId = _activeTranslationStreamId;
+    if (activeStreamId == null) {
+      return null;
+    }
+    return _translationState.sessionErrors.any(
+          (error) => error.streamId == activeStreamId,
+        )
+        ? translationUnavailableWarning
+        : null;
+  }
+
   bool get benchmarkEnabled => _benchmark.enabled;
   bool get hasPendingBenchmarkTranscriptRender => _benchmark.hasPendingUiRender;
   int get latestBenchmarkTranscriptRevision =>
       _benchmark.latestTranscriptRevision;
+
+  bool selectAudioSource(MobileAudioSource source) {
+    if (_isDisposed || _state != LiveSessionState.ready) {
+      return false;
+    }
+    if (source == MobileAudioSource.systemAudio && !_isSystemAudioSupported) {
+      return false;
+    }
+    if (_selectedAudioSource == source) {
+      return true;
+    }
+    _selectedAudioSource = source;
+    _notifyListeners();
+    return true;
+  }
+
+  bool selectTranslationTarget(TranslationTargetLanguage target) {
+    if (_isDisposed || _state != LiveSessionState.ready) {
+      return false;
+    }
+    if (_selectedTranslationTarget == target) {
+      return true;
+    }
+    _selectedTranslationTarget = target;
+    _notifyListeners();
+    return true;
+  }
+
+  SttSessionStartOptions get _startOptions => SttSessionStartOptions(
+    translationTarget: translationEnabled ? _selectedTranslationTarget : null,
+  );
+
+  Future<void> _loadSystemAudioSupport() async {
+    final query = _systemAudioSupportQuery;
+    var supported = false;
+    if (_systemAudioInput != null && query != null) {
+      try {
+        supported = await query();
+      } catch (_) {
+        supported = false;
+      }
+    }
+    if (_isDisposed) {
+      return;
+    }
+    _isSystemAudioSupported = supported;
+    if (!supported && _selectedAudioSource == MobileAudioSource.systemAudio) {
+      _selectedAudioSource = MobileAudioSource.microphone;
+    }
+    _notifyListeners();
+  }
 
   void recordBenchmarkTranscriptRendered(int transcriptRevision) {
     _benchmark.recordUiRendered(transcriptRevision);
@@ -88,6 +198,25 @@ class LiveSessionController extends ChangeNotifier {
     if (_isDisposed || _state != LiveSessionState.ready) {
       return;
     }
+    final selectedSource = _selectedAudioSource;
+    final selectedInput = selectedSource == MobileAudioSource.microphone
+        ? _microphoneCapture
+        : _systemAudioInput;
+    if (selectedInput == null ||
+        (selectedSource == MobileAudioSource.systemAudio &&
+            !_isSystemAudioSupported)) {
+      _errorMessage = 'System Audio is unavailable on this device.';
+      _canRetry = false;
+      _retryKind = null;
+      _state = LiveSessionState.error;
+      _notifyListeners();
+      return;
+    }
+    _activeAudioInput = selectedInput;
+    _transcriptSegments.clear();
+    _translationState = const TranslationState();
+    _activeTranslationStreamId = null;
+    _hasStoppedSession = false;
     final operationGeneration = ++_operationGeneration;
     _benchmark.sessionStartRequested();
 
@@ -107,7 +236,9 @@ class LiveSessionController extends ChangeNotifier {
           _state != LiveSessionState.permission) {
         return;
       }
-      _errorMessage = 'Unable to request microphone permission.';
+      _errorMessage = selectedSource == MobileAudioSource.microphone
+          ? 'Unable to request microphone permission.'
+          : 'Unable to request audio capture permission.';
       _benchmark.recordError();
       _canRetry = true;
       _retryKind = LiveSessionRetryKind.freshStart;
@@ -124,13 +255,33 @@ class LiveSessionController extends ChangeNotifier {
           permission == MicrophonePermissionResult.permanentlyDenied;
       _canRetry = true;
       _retryKind = LiveSessionRetryKind.freshStart;
-      _errorMessage = permission == MicrophonePermissionResult.denied
-          ? 'Microphone permission is required to start a live session.'
-          : 'Microphone permission is permanently denied. Open app settings to enable it.';
+      _errorMessage = switch ((selectedSource, permission)) {
+        (MobileAudioSource.microphone, MicrophonePermissionResult.denied) =>
+          'Microphone permission is required to start a live session.',
+        (MobileAudioSource.microphone, _) =>
+          'Microphone permission is permanently denied. Open app settings to enable it.',
+        (MobileAudioSource.systemAudio, MicrophonePermissionResult.denied) =>
+          'Audio capture permission is required to use System Audio.',
+        (MobileAudioSource.systemAudio, _) =>
+          'Audio capture permission is permanently denied. Open app settings to enable it.',
+      };
       _benchmark.recordError();
       _state = LiveSessionState.error;
       _notifyListeners();
       return;
+    }
+
+    if (selectedSource == MobileAudioSource.systemAudio) {
+      final captureStarted = await _startAudioInput(
+        input: selectedInput,
+        source: selectedSource,
+        operationGeneration: operationGeneration,
+        expectedState: LiveSessionState.permission,
+        disconnectTransportOnFailure: false,
+      );
+      if (!captureStarted) {
+        return;
+      }
     }
 
     _state = LiveSessionState.connecting;
@@ -138,8 +289,12 @@ class LiveSessionController extends ChangeNotifier {
 
     _benchmark.connectStarted();
     try {
-      await _transport.connect();
+      await _transport.connect(options: _startOptions);
     } catch (error) {
+      if (selectedSource == MobileAudioSource.systemAudio) {
+        await _cancelAudioSubscription();
+        await _stopMicrophoneSafely();
+      }
       if (operationGeneration != _operationGeneration ||
           _state != LiveSessionState.connecting) {
         return;
@@ -160,36 +315,17 @@ class LiveSessionController extends ChangeNotifier {
     }
     _benchmark.websocketReady();
 
-    try {
-      final audioStream = await _microphoneCapture.start();
-      if (operationGeneration != _operationGeneration ||
-          _state != LiveSessionState.connecting ||
-          _isDisposed) {
-        await _stopMicrophoneSafely();
-        return;
-      }
-      _benchmark.microphoneStarted();
-      _audioSubscription = audioStream.listen(
-        _handleAudioChunk,
-        onError: _handleAudioStreamError,
-        onDone: _handleAudioStreamDone,
+    if (selectedSource == MobileAudioSource.microphone) {
+      final captureStarted = await _startAudioInput(
+        input: selectedInput,
+        source: selectedSource,
+        operationGeneration: operationGeneration,
+        expectedState: LiveSessionState.connecting,
+        disconnectTransportOnFailure: true,
       );
-    } catch (_) {
-      _forwardAudio = false;
-      await _stopMicrophoneSafely();
-      await _disconnectTransportSafely();
-      if (operationGeneration != _operationGeneration ||
-          _state != LiveSessionState.connecting ||
-          _isDisposed) {
+      if (!captureStarted) {
         return;
       }
-      _errorMessage = 'Unable to start microphone capture.';
-      _benchmark.recordError();
-      _canRetry = true;
-      _retryKind = LiveSessionRetryKind.freshStart;
-      _state = LiveSessionState.error;
-      _notifyListeners();
-      return;
     }
 
     _microphonePaused = false;
@@ -200,6 +336,53 @@ class LiveSessionController extends ChangeNotifier {
     _startTimer();
     _benchmark.listeningStarted();
     _notifyListeners();
+  }
+
+  Future<bool> _startAudioInput({
+    required MobileAudioInput input,
+    required MobileAudioSource source,
+    required int operationGeneration,
+    required LiveSessionState expectedState,
+    required bool disconnectTransportOnFailure,
+  }) async {
+    try {
+      final audioStream = await input.start();
+      if (operationGeneration != _operationGeneration ||
+          _state != expectedState ||
+          _isDisposed) {
+        await _stopMicrophoneSafely();
+        return false;
+      }
+      _benchmark.microphoneStarted();
+      _audioSubscription = audioStream.listen(
+        _handleAudioChunk,
+        onError: _handleAudioStreamError,
+        onDone: _handleAudioStreamDone,
+      );
+      return true;
+    } catch (error) {
+      _forwardAudio = false;
+      await _stopMicrophoneSafely();
+      if (disconnectTransportOnFailure) {
+        await _disconnectTransportSafely();
+      }
+      if (operationGeneration != _operationGeneration ||
+          _state != expectedState ||
+          _isDisposed) {
+        return false;
+      }
+      _errorMessage = error is AudioInputException
+          ? error.message
+          : source == MobileAudioSource.microphone
+          ? 'Unable to start microphone capture.'
+          : 'Unable to start System Audio capture.';
+      _benchmark.recordError();
+      _canRetry = error is AudioInputException ? error.recoverable : true;
+      _retryKind = _canRetry ? LiveSessionRetryKind.freshStart : null;
+      _state = LiveSessionState.error;
+      _notifyListeners();
+      return false;
+    }
   }
 
   Future<bool> openAppSettings() async {
@@ -215,6 +398,7 @@ class LiveSessionController extends ChangeNotifier {
       return Future<void>.value();
     }
     if (retryKind == LiveSessionRetryKind.activeSessionReconnect) {
+      _activeTranslationStreamId = null;
       _errorMessage = null;
       _canOpenAppSettings = false;
       _canRetry = false;
@@ -267,8 +451,12 @@ class LiveSessionController extends ChangeNotifier {
     }
 
     final operationGeneration = _operationGeneration;
+    final activeAudioInput = _activeAudioInput;
+    if (activeAudioInput == null) {
+      return;
+    }
     try {
-      await _microphoneCapture.resume();
+      await activeAudioInput.resume();
     } catch (_) {
       return;
     }
@@ -324,6 +512,7 @@ class LiveSessionController extends ChangeNotifier {
     await _waitForMicrophoneFailureCleanup();
     await _cancelAudioSubscription();
     await _stopMicrophoneSafely();
+    _activeAudioInput = null;
     await _waitForAudioSend();
 
     try {
@@ -341,13 +530,15 @@ class LiveSessionController extends ChangeNotifier {
     }
 
     _accumulatedElapsed = Duration.zero;
-    _transcriptSegments.clear();
+    _transcriptSegments.removeWhere((_, segment) => !segment.isFinal);
     _errorMessage = null;
     _canOpenAppSettings = false;
     _canRetry = false;
     _retryKind = null;
     _restorePausedAfterReconnect = false;
+    _activeTranslationStreamId = null;
     _benchmark.stopped();
+    _hasStoppedSession = true;
     _state = LiveSessionState.ready;
     _notifyListeners();
   }
@@ -381,10 +572,7 @@ class LiveSessionController extends ChangeNotifier {
     _audioSendFuture = sharedSend;
   }
 
-  Future<void> _sendAudioIfCurrent(
-    Uint8List audio,
-    int operationGeneration,
-  ) {
+  Future<void> _sendAudioIfCurrent(Uint8List audio, int operationGeneration) {
     if (_isDisposed ||
         !_forwardAudio ||
         operationGeneration != _operationGeneration ||
@@ -412,14 +600,22 @@ class LiveSessionController extends ChangeNotifier {
   }
 
   void _handleUnexpectedMicrophoneEnd({Future<void>? cancelFuture}) {
-    if (_isDisposed || !_forwardAudio || _state != LiveSessionState.listening) {
+    final captureWasActive =
+        _state == LiveSessionState.permission ||
+        _state == LiveSessionState.connecting ||
+        _state == LiveSessionState.listening ||
+        _state == LiveSessionState.paused ||
+        _state == LiveSessionState.reconnecting;
+    if (_isDisposed || !captureWasActive) {
       return;
     }
 
     _forwardAudio = false;
     _operationGeneration++;
     _freezeTimer();
-    _errorMessage = 'Microphone capture stopped unexpectedly.';
+    _errorMessage = _selectedAudioSource == MobileAudioSource.microphone
+        ? 'Microphone capture stopped unexpectedly.'
+        : 'System Audio capture stopped unexpectedly.';
     _benchmark.recordError();
     _canOpenAppSettings = false;
     _canRetry = true;
@@ -474,8 +670,12 @@ class LiveSessionController extends ChangeNotifier {
     if (activePause != null) {
       return activePause;
     }
+    final activeAudioInput = _activeAudioInput;
+    if (activeAudioInput == null) {
+      return Future<void>.value();
+    }
     late final Future<void> sharedPause;
-    sharedPause = _microphoneCapture
+    sharedPause = activeAudioInput
         .pause()
         .catchError((Object _, StackTrace _) {})
         .whenComplete(() {
@@ -514,8 +714,13 @@ class LiveSessionController extends ChangeNotifier {
   }
 
   Future<void> _stopMicrophoneSafely() async {
+    final activeAudioInput = _activeAudioInput;
+    if (activeAudioInput == null) {
+      _microphonePaused = false;
+      return;
+    }
     try {
-      await _microphoneCapture.stop();
+      await activeAudioInput.stop();
     } catch (_) {
       // Remaining transport cleanup must still run.
     }
@@ -567,7 +772,76 @@ class LiveSessionController extends ChangeNotifier {
           segmentId: event.segmentId,
         );
       }
-      _transcriptSegments[event.segmentId] = event.text;
+      final identity = TranscriptSegmentIdentity(
+        event.streamId,
+        event.segmentId,
+      );
+      final previous = _transcriptSegments[identity];
+      final incomingKind = event.kind == SttTranscriptKind.interim
+          ? 'interim'
+          : 'final';
+      if (previous?.isFinal == true) {
+        transcriptTrace.segmentApplied(
+          segmentId: event.segmentId,
+          incomingKind: incomingKind,
+          previousText: previous!.text,
+          resultingText: previous.text,
+          action: TranscriptSegmentAction.ignored,
+        );
+        return;
+      }
+      final resulting = LiveTranscriptSegment(
+        streamId: event.streamId,
+        segmentId: event.segmentId,
+        text: event.text,
+        isFinal: event.kind == SttTranscriptKind.finalResult,
+      );
+      _transcriptSegments[identity] = resulting;
+      transcriptTrace.segmentApplied(
+        segmentId: event.segmentId,
+        incomingKind: incomingKind,
+        previousText: previous?.text,
+        resultingText: resulting.text,
+        action: previous == null
+            ? TranscriptSegmentAction.inserted
+            : resulting.isFinal
+            ? TranscriptSegmentAction.finalized
+            : TranscriptSegmentAction.revised,
+      );
+      if (resulting.isFinal) {
+        transcriptTrace.finalSegmentSnapshot(
+          _transcriptSegments.entries
+              .where((entry) => entry.value.isFinal)
+              .map(
+                (entry) => TranscriptTraceFinalSegment(
+                  segmentId: entry.value.segmentId,
+                  text: entry.value.text,
+                ),
+              )
+              .toList(),
+        );
+      }
+      _notifyListeners();
+      return;
+    }
+    if (event is SttTranslationEvent) {
+      final next = _translationState.apply(event.translation);
+      final previousActiveStreamId = _activeTranslationStreamId;
+      final activeStreamId = switch (event.translation) {
+        TranslationConfiguredEvent value => value.streamId,
+        TranslationUtteranceEvent value => value.streamId,
+        TranslationSessionErrorEvent value => value.streamId,
+      };
+      _activeTranslationStreamId = activeStreamId;
+      if (identical(next, _translationState) &&
+          previousActiveStreamId == activeStreamId) {
+        return;
+      }
+      _translationState = next;
+      final translation = event.translation;
+      if (translation is TranslationConfiguredEvent) {
+        _selectedTranslationTarget = translation.targetLanguage;
+      }
       _notifyListeners();
       return;
     }
@@ -605,6 +879,7 @@ class LiveSessionController extends ChangeNotifier {
         event.unexpected &&
         (_state == LiveSessionState.listening ||
             _state == LiveSessionState.paused)) {
+      _activeTranslationStreamId = null;
       _restorePausedAfterReconnect = _state == LiveSessionState.paused;
       _forwardAudio = false;
       _freezeTimer();
@@ -645,14 +920,18 @@ class LiveSessionController extends ChangeNotifier {
             _state != LiveSessionState.reconnecting) {
           return;
         }
-        await _transport.connect();
+        await _transport.connect(options: _startOptions);
         if (operationGeneration != _operationGeneration ||
             _state != LiveSessionState.reconnecting) {
           return;
         }
         final restorePaused = _restorePausedAfterReconnect;
         if (!restorePaused) {
-          await _microphoneCapture.resume();
+          final activeAudioInput = _activeAudioInput;
+          if (activeAudioInput == null) {
+            throw StateError('No active audio input to resume.');
+          }
+          await activeAudioInput.resume();
           if (_isDisposed ||
               operationGeneration != _operationGeneration ||
               _state != LiveSessionState.reconnecting) {
@@ -728,6 +1007,16 @@ class LiveSessionController extends ChangeNotifier {
     } catch (_) {
       // Transport cleanup must still run.
     }
+    final systemAudioInput = _systemAudioInput;
+    if (systemAudioInput != null &&
+        !identical(systemAudioInput, _microphoneCapture)) {
+      try {
+        await systemAudioInput.dispose();
+      } catch (_) {
+        // Transport cleanup must still run.
+      }
+    }
+    _activeAudioInput = null;
     await _waitForAudioSend();
     await _disconnectTransportSafely();
   }

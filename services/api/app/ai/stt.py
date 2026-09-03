@@ -14,6 +14,7 @@ class SttTranscript:
     segment_id: str
     text: str
     language: Literal["vi"] = "vi"
+    utterance_boundary: bool = False
 
 
 class ProviderUnavailableError(Exception):

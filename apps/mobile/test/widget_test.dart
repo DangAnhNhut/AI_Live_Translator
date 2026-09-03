@@ -21,7 +21,9 @@ class FakeAppTransport implements SttSessionTransport {
   Stream<SttSessionEvent> get events => const Stream.empty();
 
   @override
-  Future<void> connect() async {}
+  Future<void> connect({
+    SttSessionStartOptions options = const SttSessionStartOptions(),
+  }) async {}
 
   @override
   Future<void> sendAudio(Uint8List audio) async {}
@@ -69,6 +71,8 @@ void main() {
     expect(find.text('Live Session'), findsOneWidget);
     expect(find.text('Ready'), findsOneWidget);
 
+    await tester.ensureVisible(find.text('Start'));
+    await tester.pump();
     await tester.tap(find.text('Start'));
     await tester.pump();
     expect(microphoneCapture.startCalls, 1);

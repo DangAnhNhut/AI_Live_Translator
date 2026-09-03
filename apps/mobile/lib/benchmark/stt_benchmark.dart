@@ -238,6 +238,7 @@ class SttBenchmarkRecorder implements LiveSessionBenchmark {
   final Map<String, _BenchmarkUtterance> _segmentUtterances = {};
   final Set<String> _retiredSegmentIds = {};
   final List<String> _retiredSegmentOrder = [];
+  int _ambiguousUnassignedResults = 0;
   final List<_UiReceipt> _pendingUiReceipts = [];
   final List<int> _speechToFirstInterim = [];
   final List<int> _speechToFirstFinal = [];
@@ -311,6 +312,10 @@ class SttBenchmarkRecorder implements LiveSessionBenchmark {
     }
     _pausedAt = _clock.elapsed;
     _pauseCount++;
+    _retirePendingUtterancesAtPause();
+    _speechActive = false;
+    _speechArmed = false;
+    _resetSilenceRun();
     _emit('paused');
   }
 
@@ -325,7 +330,9 @@ class SttBenchmarkRecorder implements LiveSessionBenchmark {
       _appendBounded(_pauseDurations, duration);
     }
     _pausedAt = null;
-    _rearmAfterNoPcmGap(now);
+    _speechActive = false;
+    _speechArmed = true;
+    _resetSilenceRun();
     _emit('resumed', {'pause_duration_ms': duration});
   }
 
@@ -340,6 +347,7 @@ class SttBenchmarkRecorder implements LiveSessionBenchmark {
     _segmentUtterances.clear();
     _retiredSegmentIds.clear();
     _retiredSegmentOrder.clear();
+    _ambiguousUnassignedResults = 0;
     _emit('reconnect_started');
   }
 
@@ -436,6 +444,15 @@ class SttBenchmarkRecorder implements LiveSessionBenchmark {
     if (_retiredSegmentIds.contains(segmentId)) {
       if (kind == SttBenchmarkTranscriptKind.finalResult) {
         _forgetRetiredSegment(segmentId);
+      }
+      return;
+    }
+
+    if (!_segmentUtterances.containsKey(segmentId) &&
+        _ambiguousUnassignedResults > 0) {
+      _ambiguousUnassignedResults--;
+      if (kind == SttBenchmarkTranscriptKind.interim) {
+        _retireSegment(segmentId);
       }
       return;
     }
@@ -560,6 +577,29 @@ class SttBenchmarkRecorder implements LiveSessionBenchmark {
     }
   }
 
+  void _retirePendingUtterancesAtPause() {
+    var unassigned = 0;
+    final pending = _utterances
+        .where((utterance) => utterance.finalAt == null)
+        .toList();
+    for (final utterance in pending) {
+      _utterances.remove(utterance);
+      final segmentId = utterance.segmentId;
+      if (segmentId == null) {
+        unassigned++;
+        continue;
+      }
+      if (identical(_segmentUtterances[segmentId], utterance)) {
+        _segmentUtterances.remove(segmentId);
+        _retireSegment(segmentId);
+      }
+    }
+    _ambiguousUnassignedResults = math.min(
+      maxPendingUtterances,
+      _ambiguousUnassignedResults + unassigned,
+    );
+  }
+
   void _retireSegment(String segmentId) {
     if (_retiredSegmentIds.contains(segmentId)) {
       return;
@@ -641,6 +681,7 @@ class SttBenchmarkRecorder implements LiveSessionBenchmark {
     _segmentUtterances.clear();
     _retiredSegmentIds.clear();
     _retiredSegmentOrder.clear();
+    _ambiguousUnassignedResults = 0;
     _pendingUiReceipts.clear();
     _speechToFirstInterim.clear();
     _speechToFirstFinal.clear();

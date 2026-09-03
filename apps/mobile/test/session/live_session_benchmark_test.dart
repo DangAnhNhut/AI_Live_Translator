@@ -26,7 +26,9 @@ class BenchmarkTransport implements SttSessionTransport {
   Stream<SttSessionEvent> get events => eventsController.stream;
 
   @override
-  Future<void> connect() async {}
+  Future<void> connect({
+    SttSessionStartOptions options = const SttSessionStartOptions(),
+  }) async {}
 
   @override
   Future<void> disconnect() async {}

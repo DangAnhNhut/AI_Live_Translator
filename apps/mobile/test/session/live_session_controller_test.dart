@@ -1,11 +1,15 @@
 import 'dart:async';
+import 'dart:convert';
 
+import 'package:ai_live_translator_mobile/diagnostics/stt_transcript_trace.dart';
+import 'package:ai_live_translator_mobile/services/audio_input.dart';
 import 'package:ai_live_translator_mobile/services/microphone_capture_service.dart';
 import 'package:ai_live_translator_mobile/services/microphone_permission_service.dart';
 import 'package:ai_live_translator_mobile/services/stt_websocket_service.dart';
 import 'package:ai_live_translator_mobile/session/live_session_controller.dart';
 import 'package:ai_live_translator_mobile/session/live_session_state.dart';
 import 'package:ai_live_translator_mobile/session/session_timer.dart';
+import 'package:ai_live_translator_mobile/translation/translation_domain.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -41,6 +45,7 @@ class FakeSttSessionTransport implements SttSessionTransport {
 
   Completer<void>? pendingConnect;
   Completer<void>? pendingDisconnect;
+  Completer<void>? pendingStop;
   Object? connectError;
   int connectCalls = 0;
   int stopCalls = 0;
@@ -52,6 +57,7 @@ class FakeSttSessionTransport implements SttSessionTransport {
   int activeAudioSends = 0;
   int maxActiveAudioSends = 0;
   final List<Future<void>> connectResults = [];
+  final List<SttSessionStartOptions> connectOptions = [];
   final StreamController<SttSessionEvent> eventController =
       StreamController<SttSessionEvent>.broadcast();
 
@@ -59,8 +65,11 @@ class FakeSttSessionTransport implements SttSessionTransport {
   Stream<SttSessionEvent> get events => eventController.stream;
 
   @override
-  Future<void> connect() async {
+  Future<void> connect({
+    SttSessionStartOptions options = const SttSessionStartOptions(),
+  }) async {
     connectCalls++;
+    connectOptions.add(options);
     if (connectResults.isNotEmpty) {
       await connectResults.removeAt(0);
     }
@@ -102,6 +111,7 @@ class FakeSttSessionTransport implements SttSessionTransport {
   Future<void> stop() async {
     stopCalls++;
     operations.add('transport.stop');
+    await pendingStop?.future;
   }
 }
 
@@ -208,6 +218,56 @@ class FakeSessionTicker implements SessionTicker {
     clock.value += duration;
     _onTick?.call();
   }
+}
+
+class TranscriptHarness {
+  TranscriptHarness._(this.transport, this.controller);
+
+  factory TranscriptHarness({
+    SttTranscriptTrace transcriptTrace = const DisabledSttTranscriptTrace(),
+  }) {
+    final transport = FakeSttSessionTransport();
+    return TranscriptHarness._(
+      transport,
+      LiveSessionController(
+        permissionGateway: FakeMicrophonePermissionGateway(),
+        transport: transport,
+        transcriptTrace: transcriptTrace,
+      ),
+    );
+  }
+
+  final FakeSttSessionTransport transport;
+  final LiveSessionController controller;
+
+  Future<void> emit({
+    required SttTranscriptKind kind,
+    required String segmentId,
+    required String text,
+  }) async {
+    transport.eventController.add(
+      SttTranscriptEvent(
+        kind: kind,
+        segmentId: segmentId,
+        text: text,
+        language: 'vi',
+      ),
+    );
+    await Future<void>.delayed(Duration.zero);
+  }
+
+  Future<void> dispose() async {
+    controller.dispose();
+    await transport.eventController.close();
+  }
+}
+
+class CapturingControllerTranscriptTraceSink
+    implements SttTranscriptTraceJsonlSink {
+  final List<String> lines = [];
+
+  @override
+  void writeLine(String line) => lines.add(line);
 }
 
 void main() {
@@ -501,6 +561,255 @@ void main() {
       await transport.eventController.close();
     },
   );
+
+  test('interim transcript is visible for its segment', () async {
+    final harness = TranscriptHarness();
+
+    await harness.emit(
+      kind: SttTranscriptKind.interim,
+      segmentId: 'segment-a',
+      text: 'Xin',
+    );
+
+    expect(harness.controller.transcript, 'Xin');
+    await harness.dispose();
+  });
+
+  test('newer interim revises only the matching segment', () async {
+    final harness = TranscriptHarness();
+    await harness.emit(
+      kind: SttTranscriptKind.interim,
+      segmentId: 'segment-a',
+      text: 'Xin',
+    );
+
+    await harness.emit(
+      kind: SttTranscriptKind.interim,
+      segmentId: 'segment-a',
+      text: 'Xin chao',
+    );
+
+    expect(harness.controller.transcript, 'Xin chao');
+    await harness.dispose();
+  });
+
+  test('final replaces the matching interim and remains visible', () async {
+    final harness = TranscriptHarness();
+    await harness.emit(
+      kind: SttTranscriptKind.interim,
+      segmentId: 'segment-a',
+      text: 'Xin',
+    );
+
+    await harness.emit(
+      kind: SttTranscriptKind.finalResult,
+      segmentId: 'segment-a',
+      text: 'Xin chao.',
+    );
+
+    expect(harness.controller.transcript, 'Xin chao.');
+    await harness.dispose();
+  });
+
+  test('new segment does not delete an earlier final segment', () async {
+    final harness = TranscriptHarness();
+    await harness.emit(
+      kind: SttTranscriptKind.finalResult,
+      segmentId: 'segment-a',
+      text: 'Cau dau.',
+    );
+
+    await harness.emit(
+      kind: SttTranscriptKind.interim,
+      segmentId: 'segment-b',
+      text: 'Cau sau',
+    );
+
+    expect(harness.controller.transcript, 'Cau dau.\nCau sau');
+    await harness.dispose();
+  });
+
+  test('empty late interim cannot erase a finalized segment', () async {
+    final harness = TranscriptHarness();
+    await harness.emit(
+      kind: SttTranscriptKind.finalResult,
+      segmentId: 'segment-a',
+      text: 'Ban ghi da chot.',
+    );
+
+    await harness.emit(
+      kind: SttTranscriptKind.interim,
+      segmentId: 'segment-a',
+      text: '',
+    );
+
+    expect(harness.controller.transcript, 'Ban ghi da chot.');
+    await harness.dispose();
+  });
+
+  test('duplicate final is idempotent', () async {
+    final harness = TranscriptHarness();
+    await harness.emit(
+      kind: SttTranscriptKind.finalResult,
+      segmentId: 'segment-a',
+      text: 'Ban ghi da chot.',
+    );
+
+    await harness.emit(
+      kind: SttTranscriptKind.finalResult,
+      segmentId: 'segment-a',
+      text: 'Noi dung trung lap khac.',
+    );
+
+    expect(harness.controller.transcript, 'Ban ghi da chot.');
+    await harness.dispose();
+  });
+
+  test('later events cannot overwrite a different segment', () async {
+    final harness = TranscriptHarness();
+    await harness.emit(
+      kind: SttTranscriptKind.interim,
+      segmentId: 'segment-a',
+      text: 'A ban dau',
+    );
+    await harness.emit(
+      kind: SttTranscriptKind.interim,
+      segmentId: 'segment-b',
+      text: 'B khong doi',
+    );
+
+    await harness.emit(
+      kind: SttTranscriptKind.interim,
+      segmentId: 'segment-a',
+      text: 'A sua doi',
+    );
+
+    expect(harness.controller.transcript, 'A sua doi\nB khong doi');
+    await harness.dispose();
+  });
+
+  test('finalized segments stay ordered through continued speech', () async {
+    final harness = TranscriptHarness();
+    await harness.emit(
+      kind: SttTranscriptKind.finalResult,
+      segmentId: 'segment-a',
+      text: 'Mot.',
+    );
+    await harness.emit(
+      kind: SttTranscriptKind.finalResult,
+      segmentId: 'segment-b',
+      text: 'Hai.',
+    );
+    await harness.emit(
+      kind: SttTranscriptKind.interim,
+      segmentId: 'segment-c',
+      text: 'Ba',
+    );
+
+    await harness.emit(
+      kind: SttTranscriptKind.finalResult,
+      segmentId: 'segment-c',
+      text: 'Ba.',
+    );
+
+    expect(harness.controller.transcript, 'Mot.\nHai.\nBa.');
+    await harness.dispose();
+  });
+
+  test(
+    'final transcript excludes interim segments and preserves order',
+    () async {
+      final harness = TranscriptHarness();
+      await harness.emit(
+        kind: SttTranscriptKind.finalResult,
+        segmentId: 'segment-a',
+        text: 'Xin chào hôm nay.',
+      );
+      await harness.emit(
+        kind: SttTranscriptKind.interim,
+        segmentId: 'segment-b',
+        text: 'câu đang nói',
+      );
+      await harness.emit(
+        kind: SttTranscriptKind.finalResult,
+        segmentId: 'segment-c',
+        text: 'Câu đã chốt.',
+      );
+
+      expect(
+        harness.controller.transcript,
+        'Xin chào hôm nay.\ncâu đang nói\nCâu đã chốt.',
+      );
+      expect(
+        harness.controller.finalTranscript,
+        'Xin chào hôm nay.\nCâu đã chốt.',
+      );
+      await harness.dispose();
+    },
+  );
+
+  test('segment trace records decisions and ordered final snapshots', () async {
+    final sink = CapturingControllerTranscriptTraceSink();
+    final harness = TranscriptHarness(
+      transcriptTrace: createSttTranscriptTrace(enabled: true, sink: sink),
+    );
+    await harness.emit(
+      kind: SttTranscriptKind.interim,
+      segmentId: 'segment-a',
+      text: 'Mot',
+    );
+    await harness.emit(
+      kind: SttTranscriptKind.interim,
+      segmentId: 'segment-a',
+      text: 'Mot sua',
+    );
+    await harness.emit(
+      kind: SttTranscriptKind.finalResult,
+      segmentId: 'segment-a',
+      text: 'Mot.',
+    );
+    await harness.emit(
+      kind: SttTranscriptKind.finalResult,
+      segmentId: 'segment-b',
+      text: 'Hai.',
+    );
+    await harness.emit(
+      kind: SttTranscriptKind.interim,
+      segmentId: 'segment-a',
+      text: '',
+    );
+
+    final events = sink.lines
+        .map(
+          (line) =>
+              jsonDecode(line.substring(sttTranscriptTraceLinePrefix.length))
+                  as Map<String, Object?>,
+        )
+        .toList();
+    final applied = events
+        .where((event) => event['event'] == 'segment_applied')
+        .toList();
+    expect(applied.map((event) => event['action']), [
+      'inserted',
+      'revised',
+      'finalized',
+      'inserted',
+      'ignored',
+    ]);
+    expect(applied.last, containsPair('previous_text', 'Mot.'));
+    expect(applied.last, containsPair('resulting_text', 'Mot.'));
+
+    final snapshots = events
+        .where((event) => event['event'] == 'final_segment_snapshot')
+        .toList();
+    expect(snapshots, hasLength(2));
+    expect(snapshots.last['segments'], [
+      {'segment_id': 'segment-a', 'text': 'Mot.'},
+      {'segment_id': 'segment-b', 'text': 'Hai.'},
+    ]);
+
+    await harness.dispose();
+  });
 
   test(
     'unexpected close enters reconnecting and preserves elapsed time',
@@ -1026,7 +1335,40 @@ void main() {
     await transport.eventController.close();
   });
 
-  test('stop clears transcript from the completed session', () async {
+  test('stop preserves final transcript and removes current interim', () async {
+    final transport = FakeSttSessionTransport();
+    final controller = LiveSessionController(
+      permissionGateway: FakeMicrophonePermissionGateway(),
+      transport: transport,
+    );
+    await controller.start();
+    transport.eventController.add(
+      const SttTranscriptEvent(
+        kind: SttTranscriptKind.finalResult,
+        segmentId: 'segment-1',
+        text: 'Previous session',
+        language: 'vi',
+      ),
+    );
+    transport.eventController.add(
+      const SttTranscriptEvent(
+        kind: SttTranscriptKind.interim,
+        segmentId: 'segment-2',
+        text: 'unfinished words',
+        language: 'vi',
+      ),
+    );
+    await Future<void>.delayed(Duration.zero);
+    expect(controller.transcript, 'Previous session\nunfinished words');
+
+    await controller.stop();
+
+    expect(controller.transcript, 'Previous session');
+    controller.dispose();
+    await transport.eventController.close();
+  });
+
+  test('starting a new session resets the previous transcript', () async {
     final transport = FakeSttSessionTransport();
     final controller = LiveSessionController(
       permissionGateway: FakeMicrophonePermissionGateway(),
@@ -1042,11 +1384,13 @@ void main() {
       ),
     );
     await Future<void>.delayed(Duration.zero);
+    await controller.stop();
     expect(controller.transcript, 'Previous session');
 
-    await controller.stop();
+    await controller.start();
 
     expect(controller.transcript, isEmpty);
+    await controller.stop();
     controller.dispose();
     await transport.eventController.close();
   });
@@ -1627,10 +1971,7 @@ void main() {
       final microphone = FakeMobileMicrophoneCapture();
       final transport = FakeSttSessionTransport()
         ..sendAudioGates.add(staleSend)
-        ..connectResults.addAll([
-          Future<void>.value(),
-          reconnectReady.future,
-        ]);
+        ..connectResults.addAll([Future<void>.value(), reconnectReady.future]);
       final controller = LiveSessionController(
         permissionGateway: FakeMicrophonePermissionGateway(),
         transport: transport,
@@ -1786,6 +2127,775 @@ void main() {
       controller.dispose();
       await transport.eventController.close();
       await microphone.audioController.close();
+    },
+  );
+
+  test(
+    'defaults to microphone and exposes system audio availability',
+    () async {
+      final transport = FakeSttSessionTransport();
+      final systemAudio = FakeMobileMicrophoneCapture();
+      final controller = LiveSessionController(
+        permissionGateway: FakeMicrophonePermissionGateway(),
+        transport: transport,
+        systemAudioInput: systemAudio,
+        systemAudioSupportQuery: () async => true,
+      );
+
+      await controller.audioSourceSupportReady;
+
+      expect(controller.selectedAudioSource, MobileAudioSource.microphone);
+      expect(controller.isSystemAudioSupported, isTrue);
+
+      controller.dispose();
+      await transport.eventController.close();
+      unawaited(systemAudio.audioController.close());
+    },
+  );
+
+  test('unsupported system audio cannot be selected', () async {
+    final transport = FakeSttSessionTransport();
+    final systemAudio = FakeMobileMicrophoneCapture();
+    final controller = LiveSessionController(
+      permissionGateway: FakeMicrophonePermissionGateway(),
+      transport: transport,
+      systemAudioInput: systemAudio,
+      systemAudioSupportQuery: () async => false,
+    );
+
+    await controller.audioSourceSupportReady;
+
+    expect(
+      controller.selectAudioSource(MobileAudioSource.systemAudio),
+      isFalse,
+    );
+    expect(controller.selectedAudioSource, MobileAudioSource.microphone);
+
+    controller.dispose();
+    await transport.eventController.close();
+    unawaited(systemAudio.audioController.close());
+  });
+
+  test(
+    'system audio becomes ready before the STT transport connects',
+    () async {
+      final captureReady = Completer<Stream<Uint8List>>();
+      final microphone = FakeMobileMicrophoneCapture();
+      final systemAudio = FakeMobileMicrophoneCapture()
+        ..pendingStart = captureReady;
+      final transport = FakeSttSessionTransport();
+      final controller = LiveSessionController(
+        permissionGateway: FakeMicrophonePermissionGateway(),
+        transport: transport,
+        microphoneCapture: microphone,
+        systemAudioInput: systemAudio,
+        systemAudioSupportQuery: () async => true,
+      );
+      await controller.audioSourceSupportReady;
+      controller.selectAudioSource(MobileAudioSource.systemAudio);
+
+      final start = controller.start();
+      await Future<void>.delayed(Duration.zero);
+
+      expect(systemAudio.startCalls, 1);
+      expect(transport.connectCalls, 0);
+
+      captureReady.complete(systemAudio.audioController.stream);
+      await start;
+
+      expect(transport.connectCalls, 1);
+      expect(controller.state, LiveSessionState.listening);
+
+      await controller.stop();
+      controller.dispose();
+      await transport.eventController.close();
+      unawaited(microphone.audioController.close());
+      await systemAudio.audioController.close();
+    },
+  );
+
+  test(
+    'system permission cancellation never opens the STT transport',
+    () async {
+      final microphone = FakeMobileMicrophoneCapture();
+      final systemAudio = FakeMobileMicrophoneCapture()
+        ..startError = const AudioInputException(
+          code: 'projection_cancelled',
+          message: 'System Audio permission was cancelled.',
+        );
+      final transport = FakeSttSessionTransport();
+      final controller = LiveSessionController(
+        permissionGateway: FakeMicrophonePermissionGateway(),
+        transport: transport,
+        microphoneCapture: microphone,
+        systemAudioInput: systemAudio,
+        systemAudioSupportQuery: () async => true,
+      );
+      await controller.audioSourceSupportReady;
+      controller.selectAudioSource(MobileAudioSource.systemAudio);
+
+      await controller.start();
+
+      expect(controller.state, LiveSessionState.error);
+      expect(controller.errorMessage, 'System Audio permission was cancelled.');
+      expect(transport.connectCalls, 0);
+
+      await controller.stop();
+      controller.dispose();
+      await transport.eventController.close();
+      unawaited(microphone.audioController.close());
+      unawaited(systemAudio.audioController.close());
+    },
+  );
+
+  test('system audio can retry after a controlled start failure', () async {
+    final microphone = FakeMobileMicrophoneCapture();
+    final systemAudio = FakeMobileMicrophoneCapture()
+      ..startError = const AudioInputException(
+        code: 'projection_cancelled',
+        message: 'System Audio permission was cancelled.',
+      );
+    final transport = FakeSttSessionTransport();
+    final controller = LiveSessionController(
+      permissionGateway: FakeMicrophonePermissionGateway(),
+      transport: transport,
+      microphoneCapture: microphone,
+      systemAudioInput: systemAudio,
+      systemAudioSupportQuery: () async => true,
+    );
+    await controller.audioSourceSupportReady;
+    controller.selectAudioSource(MobileAudioSource.systemAudio);
+
+    await controller.start();
+    expect(controller.state, LiveSessionState.error);
+    expect(transport.connectCalls, 0);
+
+    systemAudio.startError = null;
+    await controller.retry();
+
+    expect(controller.state, LiveSessionState.listening);
+    expect(systemAudio.startCalls, 2);
+    expect(transport.connectCalls, 1);
+    expect(controller.selectedAudioSource, MobileAudioSource.systemAudio);
+
+    await controller.stop();
+    controller.dispose();
+    await transport.eventController.close();
+    unawaited(microphone.audioController.close());
+    await systemAudio.audioController.close();
+  });
+
+  test('source is locked while active and retained after Stop', () async {
+    final microphone = FakeMobileMicrophoneCapture();
+    final systemAudio = FakeMobileMicrophoneCapture();
+    final transport = FakeSttSessionTransport();
+    final controller = LiveSessionController(
+      permissionGateway: FakeMicrophonePermissionGateway(),
+      transport: transport,
+      microphoneCapture: microphone,
+      systemAudioInput: systemAudio,
+      systemAudioSupportQuery: () async => true,
+    );
+    await controller.audioSourceSupportReady;
+    controller.selectAudioSource(MobileAudioSource.systemAudio);
+    await controller.start();
+
+    expect(controller.selectAudioSource(MobileAudioSource.microphone), isFalse);
+    expect(controller.selectedAudioSource, MobileAudioSource.systemAudio);
+
+    await controller.stop();
+
+    expect(controller.state, LiveSessionState.ready);
+    expect(controller.selectedAudioSource, MobileAudioSource.systemAudio);
+    expect(systemAudio.stopCalls, 1);
+    expect(microphone.stopCalls, 0);
+
+    controller.dispose();
+    await transport.eventController.close();
+    unawaited(microphone.audioController.close());
+    await systemAudio.audioController.close();
+  });
+
+  test(
+    'system audio uses the same transport and Pause Resume semantics',
+    () async {
+      final microphone = FakeMobileMicrophoneCapture();
+      final systemAudio = FakeMobileMicrophoneCapture();
+      final transport = FakeSttSessionTransport();
+      final controller = LiveSessionController(
+        permissionGateway: FakeMicrophonePermissionGateway(),
+        transport: transport,
+        microphoneCapture: microphone,
+        systemAudioInput: systemAudio,
+        systemAudioSupportQuery: () async => true,
+      );
+      await controller.audioSourceSupportReady;
+      controller.selectAudioSource(MobileAudioSource.systemAudio);
+      await controller.start();
+      final first = Uint8List.fromList([1, 0]);
+      systemAudio.audioController.add(first);
+      await Future<void>.delayed(Duration.zero);
+
+      await controller.pause();
+      systemAudio.audioController.add(Uint8List.fromList([2, 0]));
+      await controller.resume();
+      final resumed = Uint8List.fromList([3, 0]);
+      systemAudio.audioController.add(resumed);
+      await Future<void>.delayed(Duration.zero);
+
+      expect(transport.sentAudio, <Matcher>[same(first), same(resumed)]);
+      expect(systemAudio.pauseCalls, 1);
+      expect(systemAudio.resumeCalls, 1);
+      expect(microphone.startCalls, 0);
+
+      await controller.stop();
+      controller.dispose();
+      await transport.eventController.close();
+      unawaited(microphone.audioController.close());
+      await systemAudio.audioController.close();
+    },
+  );
+
+  test('native system capture ending reaches controlled retry state', () async {
+    final microphone = FakeMobileMicrophoneCapture();
+    final systemAudio = FakeMobileMicrophoneCapture();
+    final transport = FakeSttSessionTransport();
+    final controller = LiveSessionController(
+      permissionGateway: FakeMicrophonePermissionGateway(),
+      transport: transport,
+      microphoneCapture: microphone,
+      systemAudioInput: systemAudio,
+      systemAudioSupportQuery: () async => true,
+    );
+    await controller.audioSourceSupportReady;
+    controller.selectAudioSource(MobileAudioSource.systemAudio);
+    await controller.start();
+
+    await systemAudio.audioController.close();
+    await Future<void>.delayed(Duration.zero);
+    await Future<void>.delayed(Duration.zero);
+
+    expect(controller.state, LiveSessionState.error);
+    expect(
+      controller.errorMessage,
+      'System Audio capture stopped unexpectedly.',
+    );
+    expect(controller.canRetry, isTrue);
+    expect(transport.disconnectCalls, 1);
+
+    controller.dispose();
+    await transport.eventController.close();
+    unawaited(microphone.audioController.close());
+  });
+
+  test(
+    'native system capture ending while paused still cleans the session',
+    () async {
+      final microphone = FakeMobileMicrophoneCapture();
+      final systemAudio = FakeMobileMicrophoneCapture();
+      final transport = FakeSttSessionTransport();
+      final controller = LiveSessionController(
+        permissionGateway: FakeMicrophonePermissionGateway(),
+        transport: transport,
+        microphoneCapture: microphone,
+        systemAudioInput: systemAudio,
+        systemAudioSupportQuery: () async => true,
+      );
+      await controller.audioSourceSupportReady;
+      controller.selectAudioSource(MobileAudioSource.systemAudio);
+      await controller.start();
+      await controller.pause();
+
+      await systemAudio.audioController.close();
+      await Future<void>.delayed(Duration.zero);
+      await Future<void>.delayed(Duration.zero);
+
+      expect(controller.state, LiveSessionState.error);
+      expect(
+        controller.errorMessage,
+        'System Audio capture stopped unexpectedly.',
+      );
+      expect(transport.disconnectCalls, 1);
+
+      controller.dispose();
+      await transport.eventController.close();
+      unawaited(microphone.audioController.close());
+    },
+  );
+
+  test(
+    'default Translation target is English and locks for active session',
+    () async {
+      final transport = FakeSttSessionTransport();
+      final controller = LiveSessionController(
+        permissionGateway: FakeMicrophonePermissionGateway(),
+        transport: transport,
+      );
+
+      expect(controller.selectedTranslationTarget, defaultTranslationTarget);
+      expect(
+        controller.selectTranslationTarget(TranslationTargetLanguage.japanese),
+        isTrue,
+      );
+      await controller.start();
+
+      expect(
+        transport.connectOptions.single.translationTarget,
+        TranslationTargetLanguage.japanese,
+      );
+      expect(
+        controller.selectTranslationTarget(TranslationTargetLanguage.french),
+        isFalse,
+      );
+      await controller.pause();
+      expect(
+        controller.selectTranslationTarget(TranslationTargetLanguage.french),
+        isFalse,
+      );
+      await controller.stop();
+      expect(
+        controller.selectTranslationTarget(TranslationTargetLanguage.french),
+        isTrue,
+      );
+
+      controller.dispose();
+      await transport.eventController.close();
+    },
+  );
+
+  test('STT-only mode omits Translation start configuration', () async {
+    final transport = FakeSttSessionTransport();
+    final controller = LiveSessionController(
+      permissionGateway: FakeMicrophonePermissionGateway(),
+      transport: transport,
+      translationEnabled: false,
+    );
+
+    await controller.start();
+
+    expect(transport.connectOptions.single.translationTarget, isNull);
+    expect(controller.usesBilingualPresentation, isFalse);
+
+    await controller.stop();
+    controller.dispose();
+    await transport.eventController.close();
+  });
+
+  test(
+    'Translation events update typed state without changing STT state',
+    () async {
+      final transport = FakeSttSessionTransport();
+      final controller = LiveSessionController(
+        permissionGateway: FakeMicrophonePermissionGateway(),
+        transport: transport,
+      );
+      await controller.start();
+
+      transport.eventController.add(
+        const SttTranslationEvent(
+          TranslationConfiguredEvent(
+            streamId: 'stream_A',
+            sourceLanguage: 'vi',
+            targetLanguage: TranslationTargetLanguage.korean,
+          ),
+        ),
+      );
+      transport.eventController.add(
+        const SttTranslationEvent(
+          TranslationPendingEvent(
+            streamId: 'stream_A',
+            utteranceId: 'utt_000001',
+            sourceSegmentIds: ['seg_1'],
+            sourceText: 'Nguon chuan.',
+            sourceLanguage: 'vi',
+            targetLanguage: TranslationTargetLanguage.korean,
+          ),
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      expect(controller.state, LiveSessionState.listening);
+      expect(
+        controller.selectedTranslationTarget,
+        TranslationTargetLanguage.korean,
+      );
+      expect(
+        controller.translationState.utterances.single.status,
+        TranslationStatus.pending,
+      );
+
+      transport.eventController.add(
+        const SttTranslationEvent(
+          TranslationFinalEvent(
+            streamId: 'stream_A',
+            utteranceId: 'utt_000001',
+            sourceSegmentIds: ['seg_1'],
+            sourceText: 'Nguon chuan.',
+            sourceLanguage: 'vi',
+            targetLanguage: TranslationTargetLanguage.korean,
+            translatedText: 'Translated.',
+          ),
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      expect(controller.translationState.utterances, hasLength(1));
+      expect(
+        controller.translationState.utterances.single.status,
+        TranslationStatus.finalResult,
+      );
+
+      await controller.stop();
+      controller.dispose();
+      await transport.eventController.close();
+    },
+  );
+
+  test('source ownership is stream-aware and keeps interim visible', () async {
+    final transport = FakeSttSessionTransport();
+    final controller = LiveSessionController(
+      permissionGateway: FakeMicrophonePermissionGateway(),
+      transport: transport,
+    );
+    await controller.start();
+    transport.eventController.add(
+      const SttTranscriptEvent(
+        kind: SttTranscriptKind.finalResult,
+        streamId: 'stream_A',
+        segmentId: 'seg_1',
+        text: 'Visible immediately.',
+        language: 'vi',
+      ),
+    );
+    transport.eventController.add(
+      const SttTranscriptEvent(
+        kind: SttTranscriptKind.finalResult,
+        streamId: 'stream_B',
+        segmentId: 'seg_1',
+        text: 'Other stream.',
+        language: 'vi',
+      ),
+    );
+    transport.eventController.add(
+      const SttTranscriptEvent(
+        kind: SttTranscriptKind.interim,
+        streamId: 'stream_A',
+        segmentId: 'seg_live',
+        text: 'Still speaking',
+        language: 'vi',
+      ),
+    );
+    await Future<void>.delayed(Duration.zero);
+    expect(controller.translationPresentation.liveSpeechSegments, hasLength(3));
+
+    transport.eventController.add(
+      const SttTranslationEvent(
+        TranslationPendingEvent(
+          streamId: 'stream_A',
+          utteranceId: 'utt_000001',
+          sourceSegmentIds: ['seg_1'],
+          sourceText: 'Backend canonical grouping.',
+          sourceLanguage: 'vi',
+          targetLanguage: TranslationTargetLanguage.english,
+        ),
+      ),
+    );
+    await Future<void>.delayed(Duration.zero);
+
+    expect(
+      controller.translationPresentation.liveSpeechSegments.map(
+        (segment) => (segment.streamId, segment.segmentId),
+      ),
+      [('stream_B', 'seg_1'), ('stream_A', 'seg_live')],
+    );
+    expect(
+      controller.translationPresentation.utterances.single.sourceText,
+      'Backend canonical grouping.',
+    );
+
+    await controller.stop();
+    controller.dispose();
+    await transport.eventController.close();
+  });
+
+  test(
+    'session Translation failure leaves STT live and is deduplicated',
+    () async {
+      final transport = FakeSttSessionTransport();
+      final controller = LiveSessionController(
+        permissionGateway: FakeMicrophonePermissionGateway(),
+        transport: transport,
+      );
+      await controller.start();
+      const event = SttTranslationEvent(
+        TranslationSessionErrorEvent(
+          streamId: 'stream_A',
+          sourceLanguage: 'vi',
+          targetLanguage: TranslationTargetLanguage.english,
+          code: 'provider_unavailable',
+          message: 'Unavailable.',
+        ),
+      );
+      transport.eventController.add(event);
+      transport.eventController.add(event);
+      await Future<void>.delayed(Duration.zero);
+
+      expect(controller.state, LiveSessionState.listening);
+      expect(controller.translationState.sessionErrors, hasLength(1));
+      expect(
+        controller.translationWarning,
+        'Translation is unavailable. Original transcript will continue.',
+      );
+
+      await controller.stop();
+      controller.dispose();
+      await transport.eventController.close();
+    },
+  );
+
+  test('healthy configured stream clears a prior stream warning', () async {
+    final transport = FakeSttSessionTransport();
+    final controller = LiveSessionController(
+      permissionGateway: FakeMicrophonePermissionGateway(),
+      transport: transport,
+    );
+    await controller.start();
+    transport.eventController.add(
+      const SttTranslationEvent(
+        TranslationSessionErrorEvent(
+          streamId: 'stream_A',
+          sourceLanguage: 'vi',
+          targetLanguage: TranslationTargetLanguage.english,
+          code: 'provider_unavailable',
+          message: 'Unavailable.',
+        ),
+      ),
+    );
+    await Future<void>.delayed(Duration.zero);
+    expect(controller.translationWarning, isNotNull);
+
+    transport.eventController.add(
+      const SttTranslationEvent(
+        TranslationConfiguredEvent(
+          streamId: 'stream_B',
+          sourceLanguage: 'vi',
+          targetLanguage: TranslationTargetLanguage.japanese,
+        ),
+      ),
+    );
+    await Future<void>.delayed(Duration.zero);
+
+    expect(controller.translationWarning, isNull);
+    expect(
+      controller.selectedTranslationTarget,
+      TranslationTargetLanguage.japanese,
+    );
+
+    await controller.stop();
+    controller.dispose();
+    await transport.eventController.close();
+  });
+
+  test('unexpected reconnect deactivates the prior stream warning', () async {
+    final reconnectReady = Completer<void>();
+    final transport = FakeSttSessionTransport()
+      ..connectResults.addAll([Future<void>.value(), reconnectReady.future]);
+    final controller = LiveSessionController(
+      permissionGateway: FakeMicrophonePermissionGateway(),
+      transport: transport,
+    );
+    await controller.start();
+    transport.eventController.add(
+      const SttTranslationEvent(
+        TranslationSessionErrorEvent(
+          streamId: 'stream_A',
+          sourceLanguage: 'vi',
+          targetLanguage: TranslationTargetLanguage.english,
+          code: 'provider_unavailable',
+          message: 'Unavailable.',
+        ),
+      ),
+    );
+    await Future<void>.delayed(Duration.zero);
+    expect(controller.translationWarning, isNotNull);
+
+    transport.eventController.add(
+      const SttSessionClosedEvent(unexpected: true),
+    );
+    await Future<void>.delayed(Duration.zero);
+
+    expect(controller.state, LiveSessionState.reconnecting);
+    expect(controller.translationWarning, isNull);
+
+    reconnectReady.complete();
+    await Future<void>.delayed(Duration.zero);
+    await controller.stop();
+    controller.dispose();
+    await transport.eventController.close();
+  });
+
+  test('active-session retry deactivates the prior stream warning', () async {
+    final reconnectReady = Completer<void>();
+    final transport = FakeSttSessionTransport()
+      ..connectResults.addAll([Future<void>.value(), reconnectReady.future]);
+    final controller = LiveSessionController(
+      permissionGateway: FakeMicrophonePermissionGateway(),
+      transport: transport,
+    );
+    await controller.start();
+    transport.eventController.add(
+      const SttTranslationEvent(
+        TranslationSessionErrorEvent(
+          streamId: 'stream_A',
+          sourceLanguage: 'vi',
+          targetLanguage: TranslationTargetLanguage.english,
+          code: 'provider_unavailable',
+          message: 'Unavailable.',
+        ),
+      ),
+    );
+    transport.eventController.add(
+      const SttSessionErrorEvent(
+        code: 'provider_error',
+        message: 'Reconnect.',
+        recoverable: true,
+      ),
+    );
+    await Future<void>.delayed(Duration.zero);
+    expect(controller.translationWarning, isNotNull);
+
+    final retry = controller.retry();
+    await Future<void>.delayed(Duration.zero);
+
+    expect(controller.state, LiveSessionState.reconnecting);
+    expect(controller.translationWarning, isNull);
+
+    reconnectReady.complete();
+    await retry;
+    await controller.stop();
+    controller.dispose();
+    await transport.eventController.close();
+  });
+
+  test('clean Stop deactivates the completed stream warning', () async {
+    final transport = FakeSttSessionTransport();
+    final controller = LiveSessionController(
+      permissionGateway: FakeMicrophonePermissionGateway(),
+      transport: transport,
+    );
+    await controller.start();
+    transport.eventController.add(
+      const SttTranslationEvent(
+        TranslationSessionErrorEvent(
+          streamId: 'stream_A',
+          sourceLanguage: 'vi',
+          targetLanguage: TranslationTargetLanguage.english,
+          code: 'provider_unavailable',
+          message: 'Unavailable.',
+        ),
+      ),
+    );
+    await Future<void>.delayed(Duration.zero);
+    expect(controller.translationWarning, isNotNull);
+
+    await controller.stop();
+
+    expect(controller.state, LiveSessionState.ready);
+    expect(controller.translationWarning, isNull);
+
+    controller.dispose();
+    await transport.eventController.close();
+  });
+
+  test('queue overflow fails only its utterance and STT continues', () async {
+    final transport = FakeSttSessionTransport();
+    final controller = LiveSessionController(
+      permissionGateway: FakeMicrophonePermissionGateway(),
+      transport: transport,
+    );
+    await controller.start();
+    transport.eventController.add(
+      const SttTranslationEvent(
+        TranslationUtteranceErrorEvent(
+          streamId: 'stream_A',
+          utteranceId: 'utt_000001',
+          sourceSegmentIds: ['seg_1'],
+          sourceText: 'Original.',
+          sourceLanguage: 'vi',
+          targetLanguage: TranslationTargetLanguage.english,
+          code: 'queue_overflow',
+          message: 'Busy.',
+        ),
+      ),
+    );
+    await Future<void>.delayed(Duration.zero);
+
+    expect(controller.state, LiveSessionState.listening);
+    expect(controller.errorMessage, isNull);
+    expect(
+      controller.translationState.utterances.single.status,
+      TranslationStatus.failed,
+    );
+
+    await controller.stop();
+    controller.dispose();
+    await transport.eventController.close();
+  });
+
+  test(
+    'Stop retains trailing source and Translation until transport drain ends',
+    () async {
+      final transport = FakeSttSessionTransport()
+        ..pendingStop = Completer<void>();
+      final controller = LiveSessionController(
+        permissionGateway: FakeMicrophonePermissionGateway(),
+        transport: transport,
+      );
+      await controller.start();
+
+      final stopFuture = controller.stop();
+      while (transport.stopCalls == 0) {
+        await Future<void>.delayed(Duration.zero);
+      }
+      expect(transport.disconnectCalls, 0);
+      transport.eventController.add(
+        const SttTranscriptEvent(
+          kind: SttTranscriptKind.finalResult,
+          streamId: 'stream_A',
+          segmentId: 'seg_tail',
+          text: 'Tail.',
+          language: 'vi',
+        ),
+      );
+      transport.eventController.add(
+        const SttTranslationEvent(
+          TranslationFinalEvent(
+            streamId: 'stream_A',
+            utteranceId: 'utt_tail',
+            sourceSegmentIds: ['seg_tail'],
+            sourceText: 'Tail.',
+            sourceLanguage: 'vi',
+            targetLanguage: TranslationTargetLanguage.english,
+            translatedText: 'Tail translated.',
+          ),
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+      expect(
+        controller.translationState.utterances.single.translatedText,
+        'Tail translated.',
+      );
+
+      transport.pendingStop!.complete();
+      await stopFuture;
+      expect(
+        transport.operations.indexOf('transport.stop'),
+        lessThan(transport.operations.indexOf('transport.disconnect')),
+      );
+      expect(controller.finalTranscript, 'Tail.');
+
+      controller.dispose();
+      await transport.eventController.close();
     },
   );
 }

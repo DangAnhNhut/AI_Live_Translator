@@ -1,26 +1,59 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --brand-primary: #4f5fe7;
+  --brand-primary-strong: #3444cd;
+  --brand-accent: #7456e8;
+  --text-primary: #111827;
+  --text-secondary: #64748b;
+  --surface-background: #f6f5ff;
+  --surface-card: #ffffff;
+  --border-default: #e2e8f0;
+  --state-live: #22c55e;
+  --state-error: #ba1a1a;
+  --state-error-container: #ffdad6;
+  --state-error-text: #93000a;
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+  --color-background: var(--surface-background);
+  --color-foreground: var(--text-primary);
+  --color-brand-primary: var(--brand-primary);
+  --color-brand-primary-strong: var(--brand-primary-strong);
+  --color-brand-accent: var(--brand-accent);
+  --color-text-primary: var(--text-primary);
+  --color-text-secondary: var(--text-secondary);
+  --color-surface-card: var(--surface-card);
+  --color-border-default: var(--border-default);
+  --color-state-live: var(--state-live);
+  --color-state-error: var(--state-error);
+  --font-sans: var(--font-inter);
+  --font-display: var(--font-plus-jakarta-sans);
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--surface-background);
+  color: var(--text-primary);
+  font-family: var(--font-inter), Inter, Arial, sans-serif;
+}
+
+::selection {
+  background: rgb(79 95 231 / 18%);
+  color: var(--brand-primary-strong);
+}
+
+:focus-visible {
+  outline: 3px solid rgb(79 95 231 / 35%);
+  outline-offset: 3px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

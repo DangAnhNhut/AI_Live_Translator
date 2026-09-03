@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 
 import 'benchmark/stt_benchmark.dart';
+import 'diagnostics/stt_transcript_trace.dart';
 import 'screens/live_session_screen.dart';
+import 'services/audio_input.dart';
 import 'services/debug_stt_session_transport.dart';
 import 'services/microphone_capture_service.dart';
 import 'services/microphone_permission_service.dart';
@@ -14,15 +16,21 @@ class AiLiveTranslatorApp extends StatefulWidget {
     required this.permissionGateway,
     required this.sessionTransport,
     required this.microphoneCapture,
+    this.systemAudioInput,
+    this.systemAudioSupportQuery,
     this.debugControls,
     this.benchmark = const DisabledLiveSessionBenchmark(),
+    this.transcriptTrace = const DisabledSttTranscriptTrace(),
   });
 
   final MicrophonePermissionGateway permissionGateway;
   final SttSessionTransport sessionTransport;
   final MobileMicrophoneCapture microphoneCapture;
+  final MobileAudioInput? systemAudioInput;
+  final SystemAudioSupportQuery? systemAudioSupportQuery;
   final DebugSttSessionControls? debugControls;
   final LiveSessionBenchmark benchmark;
+  final SttTranscriptTrace transcriptTrace;
 
   @override
   State<AiLiveTranslatorApp> createState() => _AiLiveTranslatorAppState();
@@ -38,7 +46,10 @@ class _AiLiveTranslatorAppState extends State<AiLiveTranslatorApp> {
       permissionGateway: widget.permissionGateway,
       transport: widget.sessionTransport,
       microphoneCapture: widget.microphoneCapture,
+      systemAudioInput: widget.systemAudioInput,
+      systemAudioSupportQuery: widget.systemAudioSupportQuery,
       benchmark: widget.benchmark,
+      transcriptTrace: widget.transcriptTrace,
     );
   }
 

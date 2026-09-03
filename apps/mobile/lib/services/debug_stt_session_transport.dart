@@ -57,7 +57,9 @@ class DebugSttSessionTransport
   Stream<SttSessionEvent> get events => _eventsController.stream;
 
   @override
-  Future<void> connect() async {
+  Future<void> connect({
+    SttSessionStartOptions options = const SttSessionStartOptions(),
+  }) async {
     final operationGeneration = ++_operationGeneration;
     if (_hasConnectedOnce && _remainingReconnectFailures > 0) {
       _remainingReconnectFailures--;

@@ -17,12 +17,17 @@ from app.ai.stt import (
     unconfigured_stt_provider_factory,
 )
 from app.main import app
+from app.realtime.session_hub import SessionHub
 from app.realtime.stt_protocol import SttStart, SttStateMachine
 from app.realtime.stt_socket import (
     _cancel,
     _cleanup_stream_tasks,
     _run_stream,
     websocket_stt,
+)
+from app.realtime.stt_transcript_trace import (
+    create_stt_transcript_trace,
+    get_stt_transcript_trace_factory,
 )
 from tests.fakes.stt import FakeSttProviderStream
 
@@ -36,6 +41,14 @@ VALID_START = {
     },
     "language": "vi",
 }
+
+
+def assert_ready(websocket):
+    event = websocket.receive_json()
+    assert event["type"] == "stt.ready"
+    assert isinstance(event.get("stream_id"), str)
+    assert event["stream_id"]
+    return event
 
 
 def test_task_cleanup_uses_only_python_310_asyncio_apis():
@@ -85,11 +98,16 @@ def test_streams_binary_audio_and_normalized_transcripts_then_closes(provider_ov
 
     with TestClient(app).websocket_connect("/ws/stt") as websocket:
         websocket.send_json(VALID_START)
-        assert websocket.receive_json() == {"type": "stt.ready"}
+        ready = websocket.receive_json()
+        assert ready["type"] == "stt.ready"
+        assert isinstance(ready.get("stream_id"), str)
+        assert ready["stream_id"]
+        stream_id = ready["stream_id"]
 
         websocket.send_bytes(b"\x00\x00" * 1600)
         assert websocket.receive_json() == {
             "type": "transcript.interim",
+            "stream_id": stream_id,
             "segment_id": "seg_001",
             "text": "xin chào",
             "language": "vi",
@@ -97,6 +115,7 @@ def test_streams_binary_audio_and_normalized_transcripts_then_closes(provider_ov
 
         assert websocket.receive_json() == {
             "type": "transcript.final",
+            "stream_id": stream_id,
             "segment_id": "seg_001",
             "text": "Xin chào.",
             "language": "vi",
@@ -110,6 +129,50 @@ def test_streams_binary_audio_and_normalized_transcripts_then_closes(provider_ov
     assert stream.close_calls == 1
 
 
+def test_enabled_trace_records_each_successfully_sent_transcript(provider_override):
+    transcript = "xin chao"
+    raw_audio = b"raw-secret-audio"
+    provider_override(
+        FakeSttProviderStream(
+            audio_events=(
+                SttTranscript("interim", "seg_001", transcript),
+                SttTranscript("final", "seg_001", transcript),
+            )
+        )
+    )
+    lines: list[str] = []
+    trace = create_stt_transcript_trace(enabled=True, sink=lines.append)
+    assert trace is not None
+    app.dependency_overrides[get_stt_transcript_trace_factory] = (
+        lambda: lambda: trace
+    )
+
+    with TestClient(app).websocket_connect("/ws/stt") as websocket:
+        websocket.send_json(VALID_START)
+        assert_ready(websocket)
+        websocket.send_bytes(raw_audio)
+        assert websocket.receive_json()["type"] == "transcript.interim"
+        assert websocket.receive_json()["type"] == "transcript.final"
+        websocket.send_json({"type": "stt.stop"})
+        assert websocket.receive_json() == {"type": "stt.closed"}
+
+    payloads = [
+        json.loads(line.removeprefix("STT_TRANSCRIPT_TRACE "))
+        for line in lines
+    ]
+    assert [payload["event"] for payload in payloads] == [
+        "websocket_transcript_sent",
+        "websocket_transcript_sent",
+    ]
+    assert [payload["sequence"] for payload in payloads] == [1, 2]
+    assert [payload["kind"] for payload in payloads] == ["interim", "final"]
+    assert all(payload["segment_id"] == "seg_001" for payload in payloads)
+    assert all(payload["text"] == transcript for payload in payloads)
+    joined = "\n".join(lines)
+    assert raw_audio.hex() not in joined
+    assert "test-deepgram-key" not in joined
+
+
 class ScriptedStoppingWebSocket:
     def __init__(self):
         self.incoming: asyncio.Queue[dict[str, object]] = asyncio.Queue()
@@ -120,7 +183,7 @@ class ScriptedStoppingWebSocket:
 
     async def send_json(self, event):
         self.sent.append(event)
-        if event == {"type": "stt.ready"}:
+        if event.get("type") == "stt.ready":
             await self.incoming.put(
                 {
                     "type": "websocket.receive",
@@ -153,7 +216,7 @@ class DirectEndpointWebSocket:
 
     async def send_json(self, event):
         self.sent.append(event)
-        if event == {"type": "stt.ready"}:
+        if event.get("type") == "stt.ready":
             for message in self._after_ready:
                 await self._messages.put(message)
             self._after_ready.clear()
@@ -256,7 +319,7 @@ class CancellationPhaseWebSocket:
 
     async def send_json(self, event):
         self.sent.append(event)
-        if event == {"type": "stt.ready"}:
+        if event.get("type") == "stt.ready":
             self.ready.set()
 
 
@@ -327,6 +390,8 @@ def test_peer_disconnect_during_stop_is_normal_cleanup_with_one_summary(
             websocket,
             provider_factory=lambda: stream,
             benchmark_factory=lambda: benchmark,
+            transcript_trace_factory=lambda: None,
+            session_hub=SessionHub(),
         )
     )
 
@@ -359,6 +424,8 @@ def test_provider_event_completion_during_shutdown_has_no_unretrieved_task():
                 websocket,
                 provider_factory=lambda: stream,
                 benchmark_factory=lambda: None,
+                transcript_trace_factory=lambda: None,
+                session_hub=SessionHub(),
             )
             gc.collect()
             await asyncio.sleep(0)
@@ -427,6 +494,8 @@ def test_all_stream_exit_paths_await_owned_tasks(
             websocket,
             provider_factory=lambda: stream,
             benchmark_factory=lambda: None,
+            transcript_trace_factory=lambda: None,
+            session_hub=SessionHub(),
         )
         current = asyncio.current_task()
         remaining = [
@@ -461,6 +530,8 @@ def test_parent_cancellation_during_child_cleanup_is_not_swallowed():
                 websocket,
                 provider_factory=lambda: stream,
                 benchmark_factory=lambda: None,
+                transcript_trace_factory=lambda: None,
+                session_hub=SessionHub(),
             )
         )
         await stream.cleanup_started.wait()
@@ -537,6 +608,8 @@ def test_normal_server_initiated_stop_still_closes_once():
             websocket,
             provider_factory=lambda: stream,
             benchmark_factory=lambda: None,
+            transcript_trace_factory=lambda: None,
+            session_hub=SessionHub(),
         )
     )
 
@@ -548,6 +621,40 @@ def test_normal_server_initiated_stop_still_closes_once():
     assert stream.finish_calls == 1
     assert stream.finish_completed is True
     assert stream.close_calls == 1
+
+
+def test_websocket_close_failure_does_not_leave_stale_producer_claim():
+    start = {**VALID_START, "session_id": "demo-001"}
+    websocket = DirectEndpointWebSocket(
+        (
+            {
+                "type": "websocket.receive",
+                "text": json.dumps(start),
+            },
+            {
+                "type": "websocket.receive",
+                "text": json.dumps({"type": "stt.stop"}),
+            },
+        ),
+        close_error=RuntimeError("close failed"),
+    )
+    stream = FakeSttProviderStream()
+    hub = SessionHub()
+
+    async def exercise():
+        with pytest.raises(RuntimeError, match="close failed"):
+            await websocket_stt(
+                websocket,
+                provider_factory=lambda: stream,
+                benchmark_factory=lambda: None,
+                transcript_trace_factory=lambda: None,
+                session_hub=hub,
+            )
+        return await hub.claim_producer("demo-001", object())
+
+    replacement_claimed = asyncio.run(exercise())
+
+    assert replacement_claimed is True
 
 
 def assert_terminal_error(websocket, code):
@@ -604,7 +711,7 @@ def test_rejects_duplicate_start(provider_override):
     stream = provider_override(FakeSttProviderStream())
     with TestClient(app).websocket_connect("/ws/stt") as websocket:
         websocket.send_json(VALID_START)
-        assert websocket.receive_json() == {"type": "stt.ready"}
+        assert_ready(websocket)
         websocket.send_json(VALID_START)
         assert_terminal_error(websocket, "invalid_state")
 
@@ -615,7 +722,7 @@ def test_rejects_audio_after_stop(provider_override):
     stream = provider_override(FakeSttProviderStream(block_finish=True))
     with TestClient(app).websocket_connect("/ws/stt") as websocket:
         websocket.send_json(VALID_START)
-        assert websocket.receive_json() == {"type": "stt.ready"}
+        assert_ready(websocket)
         websocket.send_json({"type": "stt.stop"})
         websocket.send_bytes(b"\x00\x00")
         assert_terminal_error(websocket, "invalid_state")
@@ -649,7 +756,7 @@ def test_provider_failures_are_normalized(
     with TestClient(app).websocket_connect("/ws/stt") as websocket:
         websocket.send_json(VALID_START)
         if stream.start_error is None:
-            assert websocket.receive_json() == {"type": "stt.ready"}
+            assert_ready(websocket)
             websocket.send_bytes(b"\x00\x00")
         error = websocket.receive_json()
         assert error["type"] == "stt.error"
@@ -668,7 +775,7 @@ def test_unexpected_error_is_sanitized_for_client_and_logs(provider_override, ca
     with caplog.at_level(logging.ERROR, logger="app.realtime.stt_socket"):
         with TestClient(app).websocket_connect("/ws/stt") as websocket:
             websocket.send_json(VALID_START)
-            assert websocket.receive_json() == {"type": "stt.ready"}
+            assert_ready(websocket)
             websocket.send_bytes(b"\x00\x00")
             error = websocket.receive_json()
             assert error == {
@@ -691,7 +798,7 @@ def test_provider_event_failure_is_normalized(provider_override):
     )
     with TestClient(app).websocket_connect("/ws/stt") as websocket:
         websocket.send_json(VALID_START)
-        assert websocket.receive_json() == {"type": "stt.ready"}
+        assert_ready(websocket)
         websocket.send_bytes(b"\x00\x00")
         error = websocket.receive_json()
         assert error["code"] == "provider_error"
@@ -712,7 +819,7 @@ def test_repeated_interims_for_same_segment_are_allowed(provider_override):
     )
     with TestClient(app).websocket_connect("/ws/stt") as websocket:
         websocket.send_json(VALID_START)
-        assert websocket.receive_json() == {"type": "stt.ready"}
+        assert_ready(websocket)
         websocket.send_bytes(b"\x00\x00")
         assert websocket.receive_json()["text"] == "xin"
         assert websocket.receive_json()["text"] == "xin chào"
@@ -731,7 +838,7 @@ def test_final_after_interim_is_allowed(provider_override):
     )
     with TestClient(app).websocket_connect("/ws/stt") as websocket:
         websocket.send_json(VALID_START)
-        assert websocket.receive_json() == {"type": "stt.ready"}
+        assert_ready(websocket)
         websocket.send_bytes(b"\x00\x00")
         assert websocket.receive_json()["type"] == "transcript.interim"
         assert websocket.receive_json()["type"] == "transcript.final"
@@ -750,7 +857,7 @@ def test_interim_after_final_is_rejected(provider_override):
     )
     with TestClient(app).websocket_connect("/ws/stt") as websocket:
         websocket.send_json(VALID_START)
-        assert websocket.receive_json() == {"type": "stt.ready"}
+        assert_ready(websocket)
         websocket.send_bytes(b"\x00\x00")
         assert websocket.receive_json()["type"] == "transcript.final"
         assert_terminal_error(websocket, "provider_error")
@@ -767,7 +874,7 @@ def test_duplicate_final_is_rejected(provider_override):
     )
     with TestClient(app).websocket_connect("/ws/stt") as websocket:
         websocket.send_json(VALID_START)
-        assert websocket.receive_json() == {"type": "stt.ready"}
+        assert_ready(websocket)
         websocket.send_bytes(b"\x00\x00")
         assert websocket.receive_json()["type"] == "transcript.final"
         assert_terminal_error(websocket, "provider_error")
@@ -781,7 +888,7 @@ def assert_malformed_transcript_is_provider_error(
     stream = provider_override(FakeSttProviderStream(audio_events=(event,)))
     with TestClient(app).websocket_connect("/ws/stt") as websocket:
         websocket.send_json(VALID_START)
-        assert websocket.receive_json() == {"type": "stt.ready"}
+        assert_ready(websocket)
         websocket.send_bytes(b"\x00\x00")
         error = websocket.receive_json()
         assert error == {
@@ -808,6 +915,19 @@ def test_non_vi_transcript_language_is_rejected(provider_override):
         provider_override,
         SttTranscript("interim", "seg_001", "wrong language", language="en"),
         "en",
+    )
+
+
+def test_non_boolean_utterance_boundary_is_rejected(provider_override):
+    assert_malformed_transcript_is_provider_error(
+        provider_override,
+        SttTranscript(
+            "final",
+            "seg_001",
+            "invalid boundary",
+            utterance_boundary="yes",
+        ),
+        "yes",
     )
 
 
@@ -842,7 +962,7 @@ def test_stop_flushes_final_before_closed(provider_override):
     )
     with TestClient(app).websocket_connect("/ws/stt") as websocket:
         websocket.send_json(VALID_START)
-        assert websocket.receive_json() == {"type": "stt.ready"}
+        assert_ready(websocket)
         websocket.send_json({"type": "stt.stop"})
         assert websocket.receive_json()["type"] == "transcript.final"
         assert websocket.receive_json() == {"type": "stt.closed"}
@@ -857,7 +977,7 @@ def test_abrupt_client_disconnect_closes_provider(provider_override):
     stream = provider_override(FakeSttProviderStream())
     with TestClient(app).websocket_connect("/ws/stt") as websocket:
         websocket.send_json(VALID_START)
-        assert websocket.receive_json() == {"type": "stt.ready"}
+        assert_ready(websocket)
         websocket.close()
 
     assert stream.close_calls == 1
@@ -893,7 +1013,7 @@ def test_enabled_benchmark_records_socket_milestones_without_sensitive_values(
 
     with TestClient(app).websocket_connect("/ws/stt") as websocket:
         websocket.send_json(VALID_START)
-        assert websocket.receive_json() == {"type": "stt.ready"}
+        assert_ready(websocket)
         websocket.send_bytes(raw_audio)
         assert websocket.receive_json()["type"] == "transcript.interim"
         assert websocket.receive_json()["type"] == "transcript.final"
@@ -942,7 +1062,7 @@ def test_provider_error_is_counted_once_without_error_detail(provider_override):
 
     with TestClient(app).websocket_connect("/ws/stt") as websocket:
         websocket.send_json(VALID_START)
-        assert websocket.receive_json() == {"type": "stt.ready"}
+        assert_ready(websocket)
         websocket.send_bytes(b"\x00\x00")
         assert websocket.receive_json()["code"] == "provider_error"
         assert websocket.receive_json() == {"type": "stt.closed"}

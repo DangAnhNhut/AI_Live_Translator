@@ -1,0 +1,159 @@
+{
+  "schema_version": 1,
+  "description": "Initial controlled Vietnamese and Vietnamese-English STT benchmark set; not representative of all Vietnamese speech.",
+  "audio_contract": {
+    "container": "wav",
+    "codec": "pcm",
+    "channels": 1,
+    "sample_rate_hz": 16000,
+    "sample_width_bits": 16,
+    "sample_encoding": "signed_integer",
+    "byte_order": "little_endian"
+  },
+  "cases": [
+    {
+      "case_id": "vi_normal_001",
+      "category": "vi_normal",
+      "reference_text": "Sáng nay tôi đi làm sớm hơn mọi ngày.",
+      "audio_file": "recordings/vi_normal_001.wav"
+    },
+    {
+      "case_id": "vi_normal_002",
+      "category": "vi_normal",
+      "reference_text": "Tôi thường uống cà phê sau bữa sáng.",
+      "audio_file": "recordings/vi_normal_002.wav"
+    },
+    {
+      "case_id": "vi_normal_003",
+      "category": "vi_normal",
+      "reference_text": "Chúng ta sẽ trao đổi công việc vào chiều mai.",
+      "audio_file": "recordings/vi_normal_003.wav"
+    },
+    {
+      "case_id": "vi_short_001",
+      "category": "vi_short",
+      "reference_text": "Chào buổi sáng.",
+      "audio_file": "recordings/vi_short_001.wav"
+    },
+    {
+      "case_id": "vi_short_002",
+      "category": "vi_short",
+      "reference_text": "Bạn khỏe không?",
+      "audio_file": "recordings/vi_short_002.wav"
+    },
+    {
+      "case_id": "vi_short_003",
+      "category": "vi_short",
+      "reference_text": "Hẹn gặp lại.",
+      "audio_file": "recordings/vi_short_003.wav"
+    },
+    {
+      "case_id": "vi_long_001",
+      "category": "vi_long",
+      "reference_text": "Sau khi hoàn thành bản thử nghiệm, nhóm phát triển sẽ kiểm tra lại toàn bộ quy trình trước khi gửi ứng dụng cho người dùng.",
+      "audio_file": "recordings/vi_long_001.wav"
+    },
+    {
+      "case_id": "vi_long_002",
+      "category": "vi_long",
+      "reference_text": "Mặc dù thời tiết thay đổi khá nhanh, chúng tôi vẫn quyết định tiếp tục chuyến đi vì mọi người đã chuẩn bị rất kỹ.",
+      "audio_file": "recordings/vi_long_002.wav"
+    },
+    {
+      "case_id": "vi_long_003",
+      "category": "vi_long",
+      "reference_text": "Khi cuộc họp kết thúc, tôi sẽ tổng hợp các ý kiến quan trọng và gửi một bản tóm tắt rõ ràng cho tất cả thành viên.",
+      "audio_file": "recordings/vi_long_003.wav"
+    },
+    {
+      "case_id": "vi_numbers_dates_001",
+      "category": "vi_numbers_dates",
+      "reference_text": "Cuộc họp bắt đầu lúc chín giờ ba mươi ngày hai mươi chín tháng tám năm hai nghìn không trăm hai mươi sáu.",
+      "audio_file": "recordings/vi_numbers_dates_001.wav"
+    },
+    {
+      "case_id": "vi_numbers_dates_002",
+      "category": "vi_numbers_dates",
+      "reference_text": "Tổng chi phí là một triệu hai trăm năm mươi nghìn đồng, đã bao gồm thuế tám phần trăm.",
+      "audio_file": "recordings/vi_numbers_dates_002.wav"
+    },
+    {
+      "case_id": "vi_numbers_dates_003",
+      "category": "vi_numbers_dates",
+      "reference_text": "Ứng dụng đang chạy phiên bản hai chấm ba chấm một và đã hoàn thành chín mươi lăm phần trăm.",
+      "audio_file": "recordings/vi_numbers_dates_003.wav"
+    },
+    {
+      "case_id": "vi_proper_names_001",
+      "category": "vi_proper_names",
+      "reference_text": "Nguyễn Minh Anh sẽ trình bày báo cáo tại Thành phố Hồ Chí Minh.",
+      "audio_file": "recordings/vi_proper_names_001.wav"
+    },
+    {
+      "case_id": "vi_proper_names_002",
+      "category": "vi_proper_names",
+      "reference_text": "Trần Thị Thu Hà đang làm việc cùng Phạm Quốc Bảo tại Đà Nẵng.",
+      "audio_file": "recordings/vi_proper_names_002.wav"
+    },
+    {
+      "case_id": "vi_proper_names_003",
+      "category": "vi_proper_names",
+      "reference_text": "Nhóm đang thử nghiệm dịch vụ của Google, Microsoft và OpenAI.",
+      "audio_file": "recordings/vi_proper_names_003.wav"
+    },
+    {
+      "case_id": "vi_technical_terms_001",
+      "category": "vi_technical_terms",
+      "reference_text": "Flutter được dùng để xây dựng giao diện ứng dụng trên điện thoại.",
+      "audio_file": "recordings/vi_technical_terms_001.wav"
+    },
+    {
+      "case_id": "vi_technical_terms_002",
+      "category": "vi_technical_terms",
+      "reference_text": "FastAPI xử lý kết nối WebSocket cho dữ liệu thời gian thực.",
+      "audio_file": "recordings/vi_technical_terms_002.wav"
+    },
+    {
+      "case_id": "vi_technical_terms_003",
+      "category": "vi_technical_terms",
+      "reference_text": "Deepgram Nova three nhận dạng giọng nói bằng công nghệ artificial intelligence.",
+      "audio_file": "recordings/vi_technical_terms_003.wav"
+    },
+    {
+      "case_id": "vi_en_mixed_001",
+      "category": "vi_en_mixed",
+      "reference_text": "Tôi đang phát triển ứng dụng bằng Flutter và backend bằng FastAPI.",
+      "audio_file": "recordings/vi_en_mixed_001.wav"
+    },
+    {
+      "case_id": "vi_en_mixed_002",
+      "category": "vi_en_mixed",
+      "reference_text": "Dữ liệu được truyền qua WebSocket theo thời gian thực.",
+      "audio_file": "recordings/vi_en_mixed_002.wav"
+    },
+    {
+      "case_id": "vi_en_mixed_003",
+      "category": "vi_en_mixed",
+      "reference_text": "Tôi đang sử dụng Deepgram Nova three để nhận dạng giọng nói.",
+      "audio_file": "recordings/vi_en_mixed_003.wav"
+    },
+    {
+      "case_id": "en_phrase_001",
+      "category": "en_phrase",
+      "reference_text": "Hello, how are you today?",
+      "audio_file": "recordings/en_phrase_001.wav"
+    },
+    {
+      "case_id": "en_phrase_002",
+      "category": "en_phrase",
+      "reference_text": "Please send me the latest report.",
+      "audio_file": "recordings/en_phrase_002.wav"
+    },
+    {
+      "case_id": "en_phrase_003",
+      "category": "en_phrase",
+      "reference_text": "The realtime connection is working correctly.",
+      "audio_file": "recordings/en_phrase_003.wav"
+    }
+  ]
+}

@@ -1,11 +1,25 @@
 import 'dart:async';
 import 'dart:typed_data';
 
+import 'package:ai_live_translator_mobile/services/audio_input.dart';
 import 'package:ai_live_translator_mobile/services/microphone_capture_service.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:record/record.dart';
 
 void main() {
+  test(
+    'record microphone capture implements the shared audio input contract',
+    () async {
+      final capture = RecordMicrophoneCapture(
+        recorder: _FakeAudioRecorderDriver(Stream<Uint8List>.empty()),
+      );
+
+      expect(capture, isA<MobileAudioInput>());
+
+      await capture.dispose();
+    },
+  );
+
   test(
     'start exposes the recorder raw stream with 16 kHz mono PCM16',
     () async {

@@ -12,6 +12,7 @@ from websockets.asyncio.client import connect
 from app.ai.stt import ProviderStreamError, SttTranscript
 from app.benchmark.stt_benchmark import SttBenchmarkObserver
 from app.realtime.stt_protocol import AudioConfig
+from app.realtime.stt_transcript_trace import SttTranscriptTraceRecorder
 
 
 class UpstreamWebSocket(Protocol):
@@ -55,6 +56,7 @@ class DeepgramSttStream:
         self._monotonic = monotonic
         self._sleep = sleep
         self._benchmark_observer = benchmark_observer
+        self._transcript_trace: SttTranscriptTraceRecorder | None = None
         self._websocket: UpstreamWebSocket | None = None
         self._reader_task: asyncio.Task[None] | None = None
         self._keepalive_task: asyncio.Task[None] | None = None
@@ -75,6 +77,12 @@ class DeepgramSttStream:
         observer: SttBenchmarkObserver,
     ) -> None:
         self._benchmark_observer = observer
+
+    def set_stt_transcript_trace(
+        self,
+        trace: SttTranscriptTraceRecorder,
+    ) -> None:
+        self._transcript_trace = trace
 
     async def start(self, audio: AudioConfig, language: Literal["vi"]) -> None:
         query = urlencode(
@@ -223,14 +231,35 @@ class DeepgramSttStream:
                 if not isinstance(first_alternative, dict):
                     continue
                 transcript = first_alternative.get("transcript")
-                if not isinstance(transcript, str) or not transcript.strip():
+                if not isinstance(transcript, str):
                     continue
                 is_final = payload.get("is_final") is True
+                if self._transcript_trace is not None:
+                    self._transcript_trace.record_provider_result(
+                        kind="final" if is_final else "interim",
+                        text=transcript,
+                        language=self._language,
+                        provider_segment_metadata={
+                            "normalized_segment_id": (
+                                f"seg_{self._segment_number:03d}"
+                            ),
+                            "channel_index": payload.get("channel_index"),
+                            "duration": payload.get("duration"),
+                            "start": payload.get("start"),
+                            "speech_final": payload.get("speech_final"),
+                            "from_finalize": payload.get("from_finalize"),
+                        },
+                    )
+                if not transcript.strip():
+                    continue
                 await self._events.put(
                     SttTranscript(
                         kind="final" if is_final else "interim",
                         segment_id=f"seg_{self._segment_number:03d}",
                         text=transcript,
+                        utterance_boundary=(
+                            is_final and payload.get("speech_final") is True
+                        ),
                     )
                 )
                 if is_final:

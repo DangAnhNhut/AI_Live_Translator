@@ -472,7 +472,7 @@ class AudioThenStopWebSocket:
 
     async def send_json(self, event):
         self.sent.append(event)
-        if event == {"type": "stt.ready"}:
+        if event.get("type") == "stt.ready":
             await self._incoming.put(
                 {"type": "websocket.receive", "bytes": self._chunk}
             )
