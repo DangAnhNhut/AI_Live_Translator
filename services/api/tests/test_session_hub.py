@@ -4,14 +4,27 @@ from app.realtime.session_hub import SessionHub
 
 
 class FakeWebSocket:
-    def __init__(self, *, fail: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        fail: bool = False,
+        fail_binary: bool = False,
+    ) -> None:
         self.fail = fail
+        self.fail_binary = fail_binary
         self.sent_events: list[dict[str, object]] = []
+        self.sent_frames: list[tuple[str, object]] = []
 
     async def send_json(self, event: dict[str, object]) -> None:
         if self.fail:
             raise RuntimeError("viewer disconnected")
         self.sent_events.append(event)
+        self.sent_frames.append(("json", event))
+
+    async def send_bytes(self, data: bytes) -> None:
+        if self.fail or self.fail_binary:
+            raise RuntimeError("viewer disconnected")
+        self.sent_frames.append(("bytes", data))
 
 
 class BlockingWebSocket(FakeWebSocket):
@@ -24,6 +37,33 @@ class BlockingWebSocket(FakeWebSocket):
         self.send_started.set()
         await self.release_send.wait()
         await super().send_json(event)
+
+
+class BinaryBlockingWebSocket(FakeWebSocket):
+    def __init__(self) -> None:
+        super().__init__()
+        self.binary_started = asyncio.Event()
+        self.binary_cancelled = asyncio.Event()
+        self.release_binary = asyncio.Event()
+
+    async def send_bytes(self, data: bytes) -> None:
+        self.binary_started.set()
+        try:
+            await self.release_binary.wait()
+        except asyncio.CancelledError:
+            self.binary_cancelled.set()
+            raise
+        await super().send_bytes(data)
+
+
+class BinaryFailingWebSocket(FakeWebSocket):
+    def __init__(self) -> None:
+        super().__init__(fail_binary=True)
+        self.binary_failed = asyncio.Event()
+
+    async def send_bytes(self, data: bytes) -> None:
+        self.binary_failed.set()
+        await super().send_bytes(data)
 
 
 def test_get_session_hub_returns_shared_instance():
@@ -464,5 +504,265 @@ def test_completed_unique_session_operations_release_lock_registry_entries():
             )
 
         assert hub._session_locks == {}
+
+    asyncio.run(exercise())
+
+
+def test_late_viewer_receives_translation_then_tts_configuration():
+    async def exercise():
+        hub = SessionHub()
+        producer = object()
+        viewer = FakeWebSocket()
+        translation_config = {
+            "type": "translation.configured",
+            "target_language": "en",
+        }
+        tts_config = {
+            "type": "tts.configured",
+            "voice": "alloy",
+        }
+        await hub.claim_producer("session-1", producer)
+        assert await hub.set_translation_config(
+            "session-1", producer, translation_config
+        ) is True
+        assert await hub.set_tts_config(
+            "session-1", producer, tts_config
+        ) is True
+
+        await hub.join_viewer("session-1", viewer)
+
+        assert viewer.sent_frames == [
+            ("json", translation_config),
+            ("json", tts_config),
+        ]
+
+    asyncio.run(exercise())
+
+
+def test_wrong_producer_cannot_set_or_publish_tts_configuration():
+    async def exercise():
+        hub = SessionHub()
+        owner = object()
+        wrong_owner = object()
+        viewer = FakeWebSocket()
+        tts_config = {"type": "tts.configured", "voice": "alloy"}
+        await hub.claim_producer("session-1", owner)
+        await hub.join_viewer("session-1", viewer)
+
+        stored = await hub.set_tts_config(
+            "session-1", wrong_owner, tts_config
+        )
+        published = await hub.publish_tts_config(
+            "session-1", wrong_owner, tts_config
+        )
+
+        assert stored is False
+        assert published is False
+        assert viewer.sent_frames == []
+
+    asyncio.run(exercise())
+
+
+def test_releasing_producer_clears_translation_and_tts_configuration():
+    async def exercise():
+        hub = SessionHub()
+        original_producer = object()
+        replacement_producer = object()
+        late_viewer = FakeWebSocket()
+        await hub.claim_producer("session-1", original_producer)
+        await hub.set_translation_config(
+            "session-1",
+            original_producer,
+            {"type": "translation.configured", "target_language": "en"},
+        )
+        await hub.set_tts_config(
+            "session-1",
+            original_producer,
+            {"type": "tts.configured", "voice": "alloy"},
+        )
+
+        assert await hub.release_producer(
+            "session-1", original_producer
+        ) is True
+        assert await hub.claim_producer(
+            "session-1", replacement_producer
+        ) is True
+        await hub.join_viewer("session-1", late_viewer)
+
+        assert late_viewer.sent_frames == []
+
+    asyncio.run(exercise())
+
+
+def test_tts_config_publication_reaches_existing_and_late_viewers_once():
+    async def exercise():
+        hub = SessionHub()
+        producer = object()
+        existing = FakeWebSocket()
+        late = FakeWebSocket()
+        tts_config = {"type": "tts.configured", "voice": "alloy"}
+        await hub.claim_producer("session-1", producer)
+        await hub.join_viewer("session-1", existing)
+
+        published = await hub.publish_tts_config(
+            "session-1", producer, tts_config
+        )
+        await hub.join_viewer("session-1", late)
+
+        assert published is True
+        assert existing.sent_frames == [("json", tts_config)]
+        assert late.sent_frames == [("json", tts_config)]
+
+    asyncio.run(exercise())
+
+
+def test_audio_pair_uses_fixed_viewer_snapshot():
+    async def exercise():
+        hub = SessionHub()
+        existing = FakeWebSocket()
+        late = FakeWebSocket()
+        metadata = {"type": "tts.audio", "sequence": 1}
+        await hub.join_viewer("session-1", existing)
+
+        snapshot = await hub.snapshot_viewers("session-1")
+        await hub.join_viewer("session-1", late)
+        await hub.deliver_audio_pair(snapshot, metadata, b"audio")
+
+        assert existing.sent_frames == [
+            ("json", metadata),
+            ("bytes", b"audio"),
+        ]
+        assert late.sent_frames == []
+
+    asyncio.run(exercise())
+
+
+def test_viewer_json_cannot_interleave_inside_audio_pair():
+    async def exercise():
+        hub = SessionHub()
+        viewer = BinaryBlockingWebSocket()
+        metadata = {"type": "tts.audio", "sequence": 1}
+        marker = {"type": "session.marker"}
+        await hub.join_viewer("session-1", viewer)
+        snapshot = await hub.snapshot_viewers("session-1")
+
+        pair_task = asyncio.create_task(
+            hub.deliver_audio_pair(snapshot, metadata, b"audio")
+        )
+        await asyncio.wait_for(viewer.binary_started.wait(), timeout=0.5)
+        marker_task = asyncio.create_task(hub.broadcast("session-1", marker))
+        await asyncio.sleep(0)
+
+        assert marker_task.done() is False
+        viewer.release_binary.set()
+        await pair_task
+        await marker_task
+        assert viewer.sent_frames == [
+            ("json", metadata),
+            ("bytes", b"audio"),
+            ("json", marker),
+        ]
+
+    asyncio.run(exercise())
+
+
+def test_two_consecutive_audio_results_remain_paired():
+    async def exercise():
+        hub = SessionHub()
+        viewer = FakeWebSocket()
+        first_metadata = {"type": "tts.audio", "sequence": 1}
+        second_metadata = {"type": "tts.audio", "sequence": 2}
+        await hub.join_viewer("session-1", viewer)
+        snapshot = await hub.snapshot_viewers("session-1")
+
+        await hub.deliver_audio_pair(snapshot, first_metadata, b"first")
+        await hub.deliver_audio_pair(snapshot, second_metadata, b"second")
+
+        assert viewer.sent_frames == [
+            ("json", first_metadata),
+            ("bytes", b"first"),
+            ("json", second_metadata),
+            ("bytes", b"second"),
+        ]
+
+    asyncio.run(exercise())
+
+
+def test_failed_binary_viewer_does_not_block_healthy_pair_or_raise():
+    async def exercise():
+        hub = SessionHub()
+        failed = FakeWebSocket(fail_binary=True)
+        healthy = FakeWebSocket()
+        metadata = {"type": "tts.audio", "sequence": 1}
+        await hub.join_viewer("session-1", failed)
+        await hub.join_viewer("session-1", healthy)
+        snapshot = await hub.snapshot_viewers("session-1")
+
+        await hub.deliver_audio_pair(snapshot, metadata, b"audio")
+
+        assert healthy.sent_frames == [
+            ("json", metadata),
+            ("bytes", b"audio"),
+        ]
+        assert hub.viewer_count("session-1") == 1
+        assert healthy in hub._viewers["session-1"]
+        assert failed not in hub._viewers["session-1"]
+
+    asyncio.run(exercise())
+
+
+def test_stalled_viewer_pair_times_out_as_one_operation():
+    async def exercise():
+        hub = SessionHub(viewer_send_timeout_seconds=0.01)
+        stalled = BinaryBlockingWebSocket()
+        healthy = FakeWebSocket()
+        metadata = {"type": "tts.audio", "sequence": 1}
+        await hub.join_viewer("session-1", stalled)
+        await hub.join_viewer("session-1", healthy)
+        snapshot = await hub.snapshot_viewers("session-1")
+
+        await asyncio.wait_for(
+            hub.deliver_audio_pair(snapshot, metadata, b"audio"),
+            timeout=0.1,
+        )
+
+        assert healthy.sent_frames == [
+            ("json", metadata),
+            ("bytes", b"audio"),
+        ]
+        assert hub.viewer_count("session-1") == 1
+        assert healthy in hub._viewers["session-1"]
+        assert stalled not in hub._viewers["session-1"]
+
+    asyncio.run(exercise())
+
+
+def test_cancelled_audio_pair_removes_pending_and_failed_viewers():
+    async def exercise():
+        hub = SessionHub()
+        failed = BinaryFailingWebSocket()
+        stalled = BinaryBlockingWebSocket()
+        metadata = {"type": "tts.audio", "sequence": 1}
+        await hub.join_viewer("session-1", failed)
+        await hub.join_viewer("session-1", stalled)
+        snapshot = await hub.snapshot_viewers("session-1")
+
+        delivery_task = asyncio.create_task(
+            hub.deliver_audio_pair(snapshot, metadata, b"audio")
+        )
+        await asyncio.wait_for(failed.binary_failed.wait(), timeout=0.5)
+        await asyncio.wait_for(stalled.binary_started.wait(), timeout=0.5)
+        await asyncio.sleep(0)
+        delivery_task.cancel()
+
+        try:
+            await delivery_task
+        except asyncio.CancelledError:
+            pass
+
+        await asyncio.wait_for(stalled.binary_cancelled.wait(), timeout=0.5)
+        assert hub.viewer_count("session-1") == 0
+        assert failed not in hub._viewers.get("session-1", set())
+        assert stalled not in hub._viewers.get("session-1", set())
 
     asyncio.run(exercise())

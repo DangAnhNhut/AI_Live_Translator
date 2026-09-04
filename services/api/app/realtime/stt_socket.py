@@ -17,6 +17,7 @@ from app.ai.stt import (
     SttTranscript,
     get_stt_provider_factory,
 )
+from app.ai.tts import SpeechSynthesizer, SpeechSynthesizerFactory
 from app.ai.translation import (
     TranslationProviderUnavailable,
     TranslatorFactory,
@@ -55,15 +56,30 @@ from app.realtime.translation_protocol import (
     translation_session_error_event,
 )
 from app.realtime.translation_session import TranslationSession
+from app.realtime.tts_orchestration import TranslationFinalTtsBridge
+from app.realtime.tts_protocol import (
+    tts_configured_event,
+    tts_session_error_event,
+)
+from app.realtime.tts_session import TtsSession
 
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 _TRANSLATION_DRAIN_TIMEOUT_SECONDS = 5.0
+_TTS_QUEUE_MAX_SIZE = 8
+_TTS_REQUEST_TIMEOUT_SECONDS = 10.0
+_TTS_DRAIN_TIMEOUT_SECONDS = 5.0
 
 
 def get_session_translator_factory() -> TranslatorFactory:
     return get_translator_factory()
+
+
+def get_session_speech_synthesizer_factory() -> (
+    SpeechSynthesizerFactory | None
+):
+    return None
 
 
 async def _cancel(
@@ -189,6 +205,54 @@ async def _send_terminal_error(
         await websocket.send_json(closed_event())
 
 
+async def _publish_startup_event(
+    websocket: WebSocket,
+    start: SttStart,
+    event: dict[str, object],
+    *,
+    session_hub: SessionHub | None,
+    publisher: SessionEventPublisher | None,
+    producer_identity: object | None,
+) -> None:
+    event_type = event["type"]
+    is_translation_config = event_type == "translation.configured"
+    is_tts_config = event_type == "tts.configured"
+    if publisher is not None:
+        if is_translation_config:
+            assert producer_identity is not None
+            await publisher.publish_translation_config(
+                event,
+                producer_identity=producer_identity,
+            )
+        elif is_tts_config:
+            assert producer_identity is not None
+            await publisher.publish_tts_config(
+                event,
+                producer_identity=producer_identity,
+            )
+        else:
+            await publisher.publish(event)
+        return
+
+    await websocket.send_json(event)
+    if session_hub is None or start.session_id is None:
+        return
+    if is_translation_config and producer_identity is not None:
+        await session_hub.publish_translation_config(
+            start.session_id,
+            producer_identity,
+            event,
+        )
+    elif is_tts_config and producer_identity is not None:
+        await session_hub.publish_tts_config(
+            start.session_id,
+            producer_identity,
+            event,
+        )
+    else:
+        await session_hub.broadcast(start.session_id, event)
+
+
 async def _run_stream(
     websocket: WebSocket,
     state: SttStateMachine,
@@ -202,6 +266,8 @@ async def _run_stream(
     translation_session: TranslationSession | None = None,
     translation_startup_event: dict[str, object] | None = None,
     producer_identity: object | None = None,
+    tts_session: TtsSession | None = None,
+    tts_startup_events: tuple[dict[str, object], ...] = (),
 ) -> SttBenchmarkCloseReason:
     stream_id = stream_id or f"stream_{uuid4().hex}"
     owned_tasks: set[asyncio.Task] = set()
@@ -222,6 +288,8 @@ async def _run_stream(
             translation_session,
             translation_startup_event,
             producer_identity,
+            tts_session,
+            tts_startup_events,
         )
     except BaseException:
         await _cleanup_stream_tasks(owned_tasks, event_tasks)
@@ -274,6 +342,8 @@ async def _run_stream_owned(
     translation_session: TranslationSession | None,
     translation_startup_event: dict[str, object] | None,
     producer_identity: object | None,
+    tts_session: TtsSession | None,
+    tts_startup_events: tuple[dict[str, object], ...],
 ) -> SttBenchmarkCloseReason:
     startup = asyncio.create_task(stream.start(start.audio, start.language))
     owned_tasks.add(startup)
@@ -311,37 +381,35 @@ async def _run_stream_owned(
     state.mark_ready()
     await websocket.send_json(ready_event(stream_id=stream_id))
     if translation_startup_event is not None:
-        is_configured = (
-            translation_startup_event["type"] == "translation.configured"
+        await _publish_startup_event(
+            websocket,
+            start,
+            translation_startup_event,
+            session_hub=session_hub,
+            publisher=publisher,
+            producer_identity=producer_identity,
         )
-        if is_configured and publisher is not None:
-            assert producer_identity is not None
-            await publisher.publish_translation_config(
-                translation_startup_event,
-                producer_identity=producer_identity,
-            )
-        elif publisher is None:
-            await websocket.send_json(translation_startup_event)
-            if (
-                is_configured
-                and session_hub is not None
-                and start.session_id is not None
-                and producer_identity is not None
-            ):
-                await session_hub.publish_translation_config(
-                    start.session_id,
-                    producer_identity,
-                    translation_startup_event,
-                )
-            elif session_hub is not None and start.session_id is not None:
-                await session_hub.broadcast(
-                    start.session_id,
-                    translation_startup_event,
-                )
-        else:
-            await publisher.publish(translation_startup_event)
+    for event in tts_startup_events:
+        await _publish_startup_event(
+            websocket,
+            start,
+            event,
+            session_hub=session_hub,
+            publisher=publisher,
+            producer_identity=producer_identity,
+        )
+    if tts_session is not None:
+        await tts_session.start()
     if translation_session is not None:
         await translation_session.start()
+
+    publisher_failure_task: asyncio.Task[None] | None = None
+    if publisher is not None:
+        publisher_failure_task = asyncio.create_task(
+            publisher.wait_for_producer_delivery_failure(),
+            name=f"publisher-failure:{stream_id}",
+        )
+        owned_tasks.add(publisher_failure_task)
 
     finalized_segment_ids: set[str] = set()
     events: AsyncIterator[SttTranscript] = stream.events()
@@ -355,7 +423,15 @@ async def _run_stream_owned(
         active = {incoming}
         if event_task is not None:
             active.add(event_task)
+        if publisher_failure_task is not None:
+            active.add(publisher_failure_task)
         done, _ = await asyncio.wait(active, return_when=asyncio.FIRST_COMPLETED)
+
+        if (
+            publisher_failure_task is not None
+            and publisher_failure_task in done
+        ):
+            return "client_disconnect"
 
         if event_task is not None and event_task in done:
             try:
@@ -424,7 +500,15 @@ async def _run_stream_owned(
             active.add(finish_task)
         if event_task is not None:
             active.add(event_task)
+        if publisher_failure_task is not None:
+            active.add(publisher_failure_task)
         done, _ = await asyncio.wait(active, return_when=asyncio.FIRST_COMPLETED)
+
+        if (
+            publisher_failure_task is not None
+            and publisher_failure_task in done
+        ):
+            return "client_disconnect"
 
         if incoming in done:
             try:
@@ -482,6 +566,12 @@ async def _run_stream_owned(
         await translation_session.flush_and_drain(
             timeout_seconds=_TRANSLATION_DRAIN_TIMEOUT_SECONDS,
         )
+    if tts_session is not None:
+        await tts_session.flush_and_drain(
+            timeout_seconds=_TTS_DRAIN_TIMEOUT_SECONDS,
+        )
+    if publisher is not None and publisher.producer_delivery_failed:
+        return "client_disconnect"
     state.mark_closed()
     await websocket.send_json(closed_event())
     return "client_stop"
@@ -504,6 +594,10 @@ async def websocket_stt(
         TranslatorFactory | None,
         Depends(get_session_translator_factory),
     ] = None,
+    synthesizer_factory: Annotated[
+        SpeechSynthesizerFactory | None,
+        Depends(get_session_speech_synthesizer_factory),
+    ] = None,
 ) -> None:
     await websocket.accept()
     state = SttStateMachine()
@@ -515,12 +609,43 @@ async def websocket_stt(
     claimed_session_id: str | None = None
     publisher: SessionEventPublisher | None = None
     translation_session: TranslationSession | None = None
+    tts_session: TtsSession | None = None
+    ai_delivery_stopped = False
 
-    async def stop_translation_delivery() -> None:
+    async def stop_ai_delivery() -> None:
+        nonlocal ai_delivery_stopped
+        if ai_delivery_stopped:
+            return
         if translation_session is not None:
             await translation_session.abort()
+        if tts_session is not None:
+            await tts_session.abort()
         if publisher is not None:
             await publisher.close()
+        ai_delivery_stopped = True
+
+    async def handle_terminal_error(
+        error_close_reason: SttBenchmarkCloseReason,
+        code: ErrorCode,
+        message: str,
+        *,
+        record_provider_error: bool = False,
+        unexpected_exception: Exception | None = None,
+    ) -> None:
+        nonlocal close_reason
+        await stop_ai_delivery()
+        if publisher is not None and publisher.producer_delivery_failed:
+            close_reason = "client_disconnect"
+            return
+        close_reason = error_close_reason
+        if record_provider_error and benchmark is not None:
+            benchmark.record_provider_error()
+        if unexpected_exception is not None:
+            logger.error(
+                "stt.websocket.internal_error exception_type=%s",
+                type(unexpected_exception).__name__,
+            )
+        await _send_terminal_error(websocket, state, code, message)
 
     try:
         first = await websocket.receive()
@@ -553,6 +678,7 @@ async def websocket_stt(
             session_id=start.session_id,
         )
         translation_startup_event: dict[str, object] | None = None
+        tts_startup_events: tuple[dict[str, object], ...] = ()
         if start.translation is not None:
             active_translator_factory = (
                 translator_factory or get_session_translator_factory()
@@ -580,12 +706,75 @@ async def websocket_stt(
                     message="Translation provider is unavailable.",
                 )
             else:
+                if start.tts is not None and start.tts.enabled:
+                    tts_configured = tts_configured_event(
+                        stream_id=stream_id,
+                        target_language=start.translation.target_language,
+                        voice=start.tts.voice,
+                    )
+                    tts_startup = [tts_configured]
+                    try:
+                        if synthesizer_factory is None:
+                            raise RuntimeError(
+                                "Speech synthesizer factory is unavailable"
+                            )
+                        synthesizer = synthesizer_factory()
+                        if not isinstance(synthesizer, SpeechSynthesizer):
+                            raise TypeError(
+                                "Speech synthesizer does not satisfy protocol"
+                            )
+                        tts_session = TtsSession(
+                            synthesizer=synthesizer,
+                            stream_id=stream_id,
+                            target_language=(
+                                start.translation.target_language
+                            ),
+                            publish_event=publisher.publish,
+                            publish_audio=publisher.publish_audio_pair,
+                            voice=start.tts.voice,
+                            queue_max_size=_TTS_QUEUE_MAX_SIZE,
+                            request_timeout_seconds=(
+                                _TTS_REQUEST_TIMEOUT_SECONDS
+                            ),
+                        )
+                    except Exception as exc:
+                        logger.error(
+                            "tts.provider.initialization_failed "
+                            "exception_type=%s",
+                            type(exc).__name__,
+                        )
+                        tts_session = None
+                        tts_startup.append(
+                            tts_session_error_event(
+                                stream_id=stream_id,
+                                target_language=(
+                                    start.translation.target_language
+                                ),
+                                code="provider_unavailable",
+                                message=(
+                                    "Speech synthesis is unavailable."
+                                ),
+                            )
+                        )
+                    tts_startup_events = tuple(tts_startup)
+
+                publish_translation = publisher.publish
+                if tts_session is not None:
+                    tts_bridge = TranslationFinalTtsBridge(
+                        publish_event=publisher.publish,
+                        tts_session=tts_session,
+                        stream_id=stream_id,
+                        target_language=(
+                            start.translation.target_language
+                        ),
+                    )
+                    publish_translation = tts_bridge.publish
                 translation_session = TranslationSession(
                     translator=translator,
                     stream_id=stream_id,
                     source_language=start.language,
                     target_language=start.translation.target_language,
-                    publish_event=publisher.publish,
+                    publish_event=publish_translation,
                     queue_max_size=settings.translation_queue_max_size,
                     request_timeout_seconds=(
                         settings.translation_request_timeout_seconds
@@ -613,44 +802,50 @@ async def websocket_stt(
             translation_session,
             translation_startup_event,
             producer_identity,
+            tts_session,
+            tts_startup_events,
         )
     except ProtocolViolation as exc:
-        close_reason = "protocol_error"
-        await stop_translation_delivery()
-        await _send_terminal_error(websocket, state, exc.code, exc.message)
+        await handle_terminal_error(
+            "protocol_error",
+            exc.code,
+            exc.message,
+        )
     except ProviderUnavailableError:
-        close_reason = "provider_unavailable"
-        await stop_translation_delivery()
-        await _send_terminal_error(
-            websocket, state, "provider_unavailable", "STT provider is unavailable."
+        await handle_terminal_error(
+            "provider_unavailable",
+            "provider_unavailable",
+            "STT provider is unavailable.",
         )
     except ProviderStreamError:
-        close_reason = "provider_error"
-        await stop_translation_delivery()
-        if benchmark is not None:
-            benchmark.record_provider_error()
-        await _send_terminal_error(
-            websocket, state, "provider_error", "STT provider stream failed."
+        await handle_terminal_error(
+            "provider_error",
+            "provider_error",
+            "STT provider stream failed.",
+            record_provider_error=True,
         )
     except Exception as exc:
-        close_reason = "internal_error"
-        await stop_translation_delivery()
-        logger.error(
-            "stt.websocket.internal_error exception_type=%s",
-            type(exc).__name__,
-        )
-        await _send_terminal_error(
-            websocket, state, "internal_error", "Internal STT error."
+        await handle_terminal_error(
+            "internal_error",
+            "internal_error",
+            "Internal STT error.",
+            unexpected_exception=exc,
         )
     finally:
         try:
-            if translation_session is not None:
-                if close_reason == "client_stop":
-                    await translation_session.close()
-                else:
-                    await translation_session.abort()
-            if publisher is not None:
-                await publisher.close()
+            if not ai_delivery_stopped:
+                if translation_session is not None:
+                    if close_reason == "client_stop":
+                        await translation_session.close()
+                    else:
+                        await translation_session.abort()
+                if tts_session is not None:
+                    if close_reason == "client_stop":
+                        await tts_session.close()
+                    else:
+                        await tts_session.abort()
+                if publisher is not None:
+                    await publisher.close()
             if stream is not None:
                 with suppress(Exception):
                     await stream.close()

@@ -9,6 +9,15 @@ class JsonWebSocket(Protocol):
     async def send_json(self, event: dict[str, object]) -> None:
         ...
 
+    async def send_bytes(self, data: bytes) -> None:
+        ...
+
+
+@dataclass(frozen=True, slots=True)
+class ViewerDeliverySnapshot:
+    session_id: str
+    _targets: tuple[tuple[JsonWebSocket, asyncio.Lock], ...]
+
 
 @dataclass(slots=True)
 class _SessionLockEntry:
@@ -30,6 +39,7 @@ class SessionHub:
         self._translation_configs: dict[
             str, tuple[object, dict[str, object]]
         ] = {}
+        self._tts_configs: dict[str, tuple[object, dict[str, object]]] = {}
         self._membership_lock = asyncio.Lock()
         self._session_locks: dict[str, _SessionLockEntry] = {}
         self._session_lock_registry = asyncio.Lock()
@@ -81,6 +91,7 @@ class SessionHub:
                     return False
                 self._producers.pop(session_id, None)
                 self._translation_configs.pop(session_id, None)
+                self._tts_configs.pop(session_id, None)
                 return True
 
     async def set_translation_config(
@@ -122,6 +133,45 @@ class SessionHub:
             )
             return True
 
+    async def set_tts_config(
+        self,
+        session_id: str,
+        producer_identity: object,
+        event: dict[str, object],
+    ) -> bool:
+        async with self._session_guard(session_id):
+            async with self._membership_lock:
+                if self._producers.get(session_id) is not producer_identity:
+                    return False
+                self._tts_configs[session_id] = (
+                    producer_identity,
+                    dict(event),
+                )
+                return True
+
+    async def publish_tts_config(
+        self,
+        session_id: str,
+        producer_identity: object,
+        event: dict[str, object],
+    ) -> bool:
+        async with self._session_guard(session_id):
+            async with self._membership_lock:
+                if self._producers.get(session_id) is not producer_identity:
+                    return False
+                stored_event = dict(event)
+                self._tts_configs[session_id] = (
+                    producer_identity,
+                    stored_event,
+                )
+                viewers = self._viewer_targets(session_id)
+            await self._send_to_viewers(
+                session_id,
+                viewers,
+                stored_event,
+            )
+            return True
+
     async def join_viewer(
         self,
         session_id: str,
@@ -134,15 +184,22 @@ class SessionHub:
                     websocket,
                     asyncio.Lock(),
                 )
-                config = self._translation_configs.get(session_id)
+                configs = tuple(
+                    config[1]
+                    for config in (
+                        self._translation_configs.get(session_id),
+                        self._tts_configs.get(session_id),
+                    )
+                    if config is not None
+                )
 
-            if config is None:
+            if not configs:
                 return
             try:
-                await self._send_to_viewers(
+                await self._send_events_to_viewers(
                     session_id,
                     ((websocket, send_lock),),
-                    config[1],
+                    configs,
                 )
             except asyncio.CancelledError:
                 await asyncio.shield(
@@ -173,6 +230,36 @@ class SessionHub:
             if not viewers:
                 self._viewers.pop(session_id, None)
 
+    async def _remove_viewers(
+        self,
+        session_id: str,
+        viewers_to_remove: set[JsonWebSocket],
+    ) -> None:
+        async with self._membership_lock:
+            active_viewers = self._viewers.get(session_id)
+            if active_viewers is None:
+                return
+
+            active_viewers.difference_update(viewers_to_remove)
+            for viewer in viewers_to_remove:
+                self._viewer_send_locks.pop(viewer, None)
+            if not active_viewers:
+                self._viewers.pop(session_id, None)
+
+    async def _remove_viewers_shielded(
+        self,
+        session_id: str,
+        viewers_to_remove: set[JsonWebSocket],
+    ) -> None:
+        cleanup_task = asyncio.create_task(
+            self._remove_viewers(session_id, viewers_to_remove)
+        )
+        try:
+            await asyncio.shield(cleanup_task)
+        except asyncio.CancelledError:
+            await asyncio.shield(cleanup_task)
+            raise
+
     async def broadcast(
         self,
         session_id: str,
@@ -183,6 +270,76 @@ class SessionHub:
                 viewers = self._viewer_targets(session_id)
 
         await self._send_to_viewers(session_id, viewers, event)
+
+    async def snapshot_viewers(
+        self,
+        session_id: str,
+    ) -> ViewerDeliverySnapshot:
+        async with self._session_guard(session_id):
+            async with self._membership_lock:
+                return ViewerDeliverySnapshot(
+                    session_id,
+                    self._viewer_targets(session_id),
+                )
+
+    async def deliver_audio_pair(
+        self,
+        snapshot: ViewerDeliverySnapshot,
+        metadata: dict[str, object],
+        audio_bytes: bytes,
+    ) -> None:
+        async def send_pair(
+            viewer: JsonWebSocket,
+            send_lock: asyncio.Lock,
+        ) -> None:
+            async with send_lock:
+                await viewer.send_json(metadata)
+                await viewer.send_bytes(audio_bytes)
+
+        tasks = tuple(
+            asyncio.create_task(
+                asyncio.wait_for(
+                    send_pair(viewer, send_lock),
+                    timeout=self._viewer_send_timeout_seconds,
+                )
+            )
+            for viewer, send_lock in snapshot._targets
+        )
+        try:
+            results = await asyncio.shield(
+                asyncio.gather(*tasks, return_exceptions=True)
+            )
+            failed_viewers = {
+                viewer
+                for (viewer, _), result in zip(snapshot._targets, results)
+                if isinstance(result, BaseException)
+            }
+            if failed_viewers:
+                await self._remove_viewers_shielded(
+                    snapshot.session_id,
+                    failed_viewers,
+                )
+        except asyncio.CancelledError:
+            unfinished_viewers = {
+                viewer
+                for (viewer, _), task in zip(snapshot._targets, tasks)
+                if not task.done()
+            }
+            for task in tasks:
+                task.cancel()
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            failed_viewers = {
+                viewer
+                for (viewer, _), result in zip(snapshot._targets, results)
+                if isinstance(result, BaseException)
+            }
+            viewers_to_remove = unfinished_viewers | failed_viewers
+            if viewers_to_remove:
+                await self._remove_viewers_shielded(
+                    snapshot.session_id,
+                    viewers_to_remove,
+                )
+            raise
 
     def _viewer_targets(
         self,
@@ -199,12 +356,21 @@ class SessionHub:
         viewers: tuple[tuple[JsonWebSocket, asyncio.Lock], ...],
         event: dict[str, object],
     ) -> None:
+        await self._send_events_to_viewers(session_id, viewers, (event,))
+
+    async def _send_events_to_viewers(
+        self,
+        session_id: str,
+        viewers: tuple[tuple[JsonWebSocket, asyncio.Lock], ...],
+        events: tuple[dict[str, object], ...],
+    ) -> None:
         async def send(
             viewer: JsonWebSocket,
             send_lock: asyncio.Lock,
         ) -> None:
             async with send_lock:
-                await viewer.send_json(event)
+                for event in events:
+                    await viewer.send_json(event)
 
         if not viewers:
             return
@@ -227,16 +393,7 @@ class SessionHub:
         if not failed_viewers:
             return
 
-        async with self._membership_lock:
-            active_viewers = self._viewers.get(session_id)
-            if active_viewers is None:
-                return
-
-            active_viewers.difference_update(failed_viewers)
-            for viewer in failed_viewers:
-                self._viewer_send_locks.pop(viewer, None)
-            if not active_viewers:
-                self._viewers.pop(session_id, None)
+        await self._remove_viewers(session_id, failed_viewers)
 
     def viewer_count(self, session_id: str) -> int:
         return len(self._viewers.get(session_id, ()))
