@@ -13,6 +13,7 @@ import 'package:ai_live_translator_mobile/session/live_session_controller.dart';
 import 'package:ai_live_translator_mobile/session/live_session_state.dart';
 import 'package:ai_live_translator_mobile/session/session_timer.dart';
 import 'package:ai_live_translator_mobile/translation/translation_domain.dart';
+import 'package:ai_live_translator_mobile/widgets/audio_source_selector.dart';
 import 'package:ai_live_translator_mobile/widgets/bilingual_transcript_block.dart';
 import 'package:ai_live_translator_mobile/widgets/translation_language_selector.dart';
 import 'package:flutter/material.dart';
@@ -636,13 +637,21 @@ void main() {
     await transport.eventController.close();
   });
 
-  testWidgets('Stop returns visible UI to Ready', (tester) async {
+  testWidgets('Stop presents Session Complete UI', (tester) async {
     final transport = FakeScreenTransport();
     final controller = LiveSessionController(
       permissionGateway: FakeScreenPermissionGateway(),
       transport: transport,
     );
     await controller.start();
+    transport.eventController.add(
+      const SttTranscriptEvent(
+        kind: SttTranscriptKind.finalResult,
+        segmentId: 'seg_1',
+        text: 'Preserved final transcript.',
+        language: 'vi',
+      ),
+    );
     await tester.pumpWidget(
       MaterialApp(home: LiveSessionScreen(controller: controller)),
     );
@@ -656,11 +665,25 @@ void main() {
     });
     await tester.pump();
 
-    expect(find.text('Ready'), findsOneWidget);
+    // MUST be visible
     expect(find.text('Session complete'), findsOneWidget);
     expect(find.widgetWithText(FilledButton, 'Start'), findsOneWidget);
+    expect(
+      find.widgetWithText(OutlinedButton, 'Save Transcript'),
+      findsOneWidget,
+    );
+    expect(find.text('Transcript Preview'), findsOneWidget);
+    expect(find.text('Preserved final transcript.'), findsOneWidget);
     expect(find.text('Stop'), findsNothing);
-    expect(find.text('00:00'), findsOneWidget);
+
+    // MUST NOT be visible as setup UI
+    expect(find.byKey(const Key('session_state_card')), findsNothing);
+    expect(find.text('Ready'), findsNothing);
+    expect(find.text('Audio Source'), findsNothing);
+    expect(find.byType(AudioSourceSelector), findsNothing);
+    expect(find.text('Translation Target'), findsNothing);
+    expect(find.byType(TranslationLanguageSelector), findsNothing);
+
     controller.dispose();
     await transport.eventController.close();
   });
@@ -1181,10 +1204,8 @@ void main() {
       await tester.pump();
 
       expect(controller.selectedAudioSource, MobileAudioSource.systemAudio);
-      final systemOption = tester.widget<Semantics>(
-        find.byKey(const Key('audio_source_system_audio')),
-      );
-      expect(systemOption.properties.enabled, isTrue);
+      expect(find.byKey(const Key('audio_source_system_audio')), findsNothing);
+      expect(find.text('Audio Source'), findsNothing);
 
       controller.dispose();
       await transport.eventController.close();
@@ -1221,10 +1242,12 @@ void main() {
 
     await tester.runAsync(controller.stop);
     await tester.pump();
-    selector = tester.widget<TranslationLanguageSelector>(
-      find.byType(TranslationLanguageSelector),
+    expect(find.byType(TranslationLanguageSelector), findsNothing);
+    expect(find.text('Translation Target'), findsNothing);
+    expect(
+      controller.selectedTranslationTarget,
+      TranslationTargetLanguage.english,
     );
-    expect(selector.enabled, isTrue);
 
     controller.dispose();
     await transport.eventController.close();

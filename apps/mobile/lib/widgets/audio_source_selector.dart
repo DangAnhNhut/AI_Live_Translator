@@ -131,38 +131,41 @@ class _AudioSourceOption extends StatelessWidget {
                   ),
                 ],
               ),
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
+              child: Stack(
                 children: [
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Icon(
-                        icon,
-                        size: 28,
-                        color: selected
-                            ? AppColors.primaryStrong
-                            : AppColors.secondaryText,
-                      ),
-                      if (selected) ...[
-                        const SizedBox(width: 8),
-                        const _ListeningBars(),
-                      ],
-                    ],
-                  ),
-                  const SizedBox(height: 10),
-                  Text(
-                    title,
-                    textAlign: TextAlign.center,
-                    style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                      fontWeight: FontWeight.w600,
+                  if (selected)
+                    const Positioned(
+                      top: 0,
+                      right: 0,
+                      child: _ListeningBars(),
                     ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    description,
-                    textAlign: TextAlign.center,
-                    style: Theme.of(context).textTheme.bodySmall,
+                  Center(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(
+                          icon,
+                          size: 32,
+                          color: selected
+                              ? AppColors.primaryStrong
+                              : AppColors.secondaryText,
+                        ),
+                        const SizedBox(height: 10),
+                        Text(
+                          title,
+                          textAlign: TextAlign.center,
+                          style: Theme.of(context).textTheme.bodyLarge?.copyWith(
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          description,
+                          textAlign: TextAlign.center,
+                          style: Theme.of(context).textTheme.bodySmall,
+                        ),
+                      ],
+                    ),
                   ),
                 ],
               ),
@@ -180,13 +183,14 @@ class _ListeningBars extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return const Row(
-      crossAxisAlignment: CrossAxisAlignment.center,
+      crossAxisAlignment: CrossAxisAlignment.end,
+      mainAxisSize: MainAxisSize.min,
       children: [
         _Bar(height: 9),
-        SizedBox(width: 3),
-        _Bar(height: 17),
-        SizedBox(width: 3),
-        _Bar(height: 12),
+        SizedBox(width: 2.5),
+        _Bar(height: 16),
+        SizedBox(width: 2.5),
+        _Bar(height: 11),
       ],
     );
   }

@@ -57,9 +57,13 @@ class BilingualTranscriptBlock extends StatelessWidget {
             labelColor: AppColors.secondaryText,
             textColor: AppColors.text,
           ),
-          const Padding(
-            padding: EdgeInsets.symmetric(vertical: 14),
-            child: Divider(),
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 12),
+            child: Divider(
+              color: failed ? AppColors.errorSoft : AppColors.border,
+              thickness: 1,
+              height: 1,
+            ),
           ),
           Container(
             key: failed ? const Key('translation_failed_surface') : null,
@@ -67,21 +71,22 @@ class BilingualTranscriptBlock extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Row(
+                  mainAxisSize: MainAxisSize.min,
                   children: [
-                    Expanded(
-                      child: _SectionLabel(
-                        view.translationLabel,
-                        color: failed
-                            ? AppColors.error
-                            : AppColors.primaryStrong,
-                      ),
+                    _SectionLabel(
+                      view.translationLabel,
+                      color: failed
+                          ? AppColors.error
+                          : AppColors.primaryStrong,
                     ),
-                    if (pending)
+                    if (pending) ...[
+                      const SizedBox(width: 6),
                       const SizedBox.square(
                         key: Key('translation_pending_indicator'),
-                        dimension: 14,
+                        dimension: 13,
                         child: CircularProgressIndicator(strokeWidth: 1.8),
                       ),
+                    ],
                   ],
                 ),
                 const SizedBox(height: 6),
@@ -104,7 +109,9 @@ class BilingualTranscriptBlock extends StatelessWidget {
                         style: Theme.of(context).textTheme.bodyLarge?.copyWith(
                           color: failed
                               ? AppColors.error
-                              : AppColors.primaryStrong,
+                              : (pending
+                                  ? AppColors.primary.withValues(alpha: 0.75)
+                                  : AppColors.primaryStrong),
                           fontWeight: FontWeight.w500,
                           fontStyle: pending
                               ? FontStyle.italic
@@ -173,7 +180,8 @@ class _SectionLabel extends StatelessWidget {
       text,
       style: Theme.of(context).textTheme.labelSmall?.copyWith(
         color: color,
-        fontWeight: FontWeight.w700,
+        fontSize: 10,
+        fontWeight: FontWeight.w600,
         letterSpacing: 0.8,
       ),
     );

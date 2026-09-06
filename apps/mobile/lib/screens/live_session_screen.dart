@@ -33,10 +33,7 @@ class LiveSessionScreen extends StatelessWidget {
       backgroundColor: AppColors.background,
       appBar: AppBar(
         title: const Text('Live Session'),
-        bottom: const PreferredSize(
-          preferredSize: Size.fromHeight(1),
-          child: Divider(),
-        ),
+        centerTitle: true,
       ),
       body: AnimatedBuilder(
         animation: controller,
@@ -48,6 +45,10 @@ class LiveSessionScreen extends StatelessWidget {
               controller.recordBenchmarkTranscriptRendered(transcriptRevision);
             });
           }
+          final isStoppedSession = controller.hasStoppedSession;
+          final isLiveActive = !isStoppedSession &&
+              (controller.state == LiveSessionState.listening ||
+                  controller.state == LiveSessionState.paused);
           return SafeArea(
             top: false,
             child: Column(
@@ -55,54 +56,93 @@ class LiveSessionScreen extends StatelessWidget {
                 Expanded(
                   child: SingleChildScrollView(
                     key: const Key('live_session_scroll_view'),
-                    padding: const EdgeInsets.fromLTRB(20, 20, 20, 24),
+                    padding: const EdgeInsets.fromLTRB(20, 16, 20, 32),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
-                        _SessionIntro(controller: controller),
-                        const SizedBox(height: 16),
-                        _SessionStateCard(controller: controller),
-                        if (controller.state == LiveSessionState.error &&
-                            controller.errorMessage != null) ...[
-                          const SizedBox(height: 16),
-                          _ErrorCard(message: controller.errorMessage!),
-                        ],
-                        if (controller.translationWarning != null) ...[
-                          const SizedBox(height: 12),
-                          _TranslationWarning(
-                            message: controller.translationWarning!,
-                          ),
-                        ],
-                        const SizedBox(height: 24),
-                        AudioSourceSelector(
-                          selectedSource: controller.selectedAudioSource,
-                          systemAudioSupported:
-                              controller.isSystemAudioSupported,
-                          enabled: controller.state == LiveSessionState.ready,
-                          onSelected: controller.selectAudioSource,
-                        ),
-                        if (controller.translationEnabled) ...[
-                          const SizedBox(height: 16),
-                          Text(
-                            'Translation Target',
-                            style: Theme.of(context).textTheme.titleMedium,
-                          ),
-                          const SizedBox(height: 12),
-                          TranslationLanguageSelector(
-                            selectedTarget:
-                                controller.selectedTranslationTarget,
-                            enabled: controller.state == LiveSessionState.ready,
-                            onChanged: controller.selectTranslationTarget,
-                          ),
-                        ],
-                        const SizedBox(height: 28),
-                        _TranscriptSection(controller: controller),
-                        if (debugControls != null) ...[
+                        if (isStoppedSession) ...[
+                          _SessionIntro(controller: controller),
                           const SizedBox(height: 20),
-                          _DebugVerificationPanel(
-                            controller: controller,
-                            controls: debugControls!,
-                          ),
+                          _TranscriptSection(controller: controller),
+                        ] else ...[
+                          if (!isLiveActive) ...[
+                            _SessionIntro(controller: controller),
+                            const SizedBox(height: 16),
+                          ],
+                          _SessionStateCard(controller: controller),
+                          if (controller.state == LiveSessionState.error &&
+                              controller.errorMessage != null) ...[
+                            const SizedBox(height: 16),
+                            _ErrorCard(message: controller.errorMessage!),
+                          ],
+                          if (controller.translationWarning != null) ...[
+                            const SizedBox(height: 12),
+                            _TranslationWarning(
+                              message: controller.translationWarning!,
+                            ),
+                          ],
+                          if (isLiveActive) ...[
+                            const SizedBox(height: 16),
+                            _TranscriptSection(controller: controller),
+                            const SizedBox(height: 24),
+                            AudioSourceSelector(
+                              selectedSource: controller.selectedAudioSource,
+                              systemAudioSupported:
+                                  controller.isSystemAudioSupported,
+                              enabled: controller.state ==
+                                  LiveSessionState.ready,
+                              onSelected: controller.selectAudioSource,
+                            ),
+                            if (controller.translationEnabled) ...[
+                              const SizedBox(height: 16),
+                              Text(
+                                'Translation Target',
+                                style: Theme.of(context).textTheme.titleMedium,
+                              ),
+                              const SizedBox(height: 12),
+                              TranslationLanguageSelector(
+                                selectedTarget:
+                                    controller.selectedTranslationTarget,
+                                enabled: controller.state ==
+                                    LiveSessionState.ready,
+                                onChanged: controller.selectTranslationTarget,
+                              ),
+                            ],
+                          ] else ...[
+                            const SizedBox(height: 24),
+                            AudioSourceSelector(
+                              selectedSource: controller.selectedAudioSource,
+                              systemAudioSupported:
+                                  controller.isSystemAudioSupported,
+                              enabled: controller.state ==
+                                  LiveSessionState.ready,
+                              onSelected: controller.selectAudioSource,
+                            ),
+                            if (controller.translationEnabled) ...[
+                              const SizedBox(height: 16),
+                              Text(
+                                'Translation Target',
+                                style: Theme.of(context).textTheme.titleMedium,
+                              ),
+                              const SizedBox(height: 12),
+                              TranslationLanguageSelector(
+                                selectedTarget:
+                                    controller.selectedTranslationTarget,
+                                enabled: controller.state ==
+                                    LiveSessionState.ready,
+                                onChanged: controller.selectTranslationTarget,
+                              ),
+                            ],
+                            const SizedBox(height: 28),
+                            _TranscriptSection(controller: controller),
+                          ],
+                          if (debugControls != null) ...[
+                            const SizedBox(height: 20),
+                            _DebugVerificationPanel(
+                              controller: controller,
+                              controls: debugControls!,
+                            ),
+                          ],
                         ],
                       ],
                     ),
@@ -150,42 +190,47 @@ class _SessionIntro extends StatelessWidget {
     if (controller.hasStoppedSession) {
       final hasFinalTranscript = controller.finalTranscript.isNotEmpty;
       return Container(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.symmetric(vertical: 24, horizontal: 20),
         decoration: _cardDecoration(),
-        child: Row(
+        child: Column(
           children: [
             Container(
-              width: 44,
-              height: 44,
-              decoration: const BoxDecoration(
+              width: 72,
+              height: 72,
+              decoration: BoxDecoration(
                 color: AppColors.primary,
                 shape: BoxShape.circle,
+                boxShadow: [
+                  BoxShadow(
+                    color: AppColors.primary.withValues(alpha: 0.28),
+                    blurRadius: 24,
+                    offset: const Offset(0, 4),
+                  ),
+                ],
               ),
               child: const Icon(
                 Icons.check_rounded,
                 color: Colors.white,
-                size: 26,
+                size: 38,
               ),
             ),
-            const SizedBox(width: 14),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'Session complete',
-                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                      color: AppColors.primaryStrong,
-                    ),
-                  ),
-                  const SizedBox(height: 3),
-                  Text(
-                    hasFinalTranscript
-                        ? 'Your final transcript remains available below.'
-                        : 'No final transcript was captured.',
-                    style: Theme.of(context).textTheme.bodySmall,
-                  ),
-                ],
+            const SizedBox(height: 16),
+            Text(
+              'Session complete',
+              textAlign: TextAlign.center,
+              style: Theme.of(context).textTheme.headlineMedium?.copyWith(
+                color: AppColors.primaryStrong,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              hasFinalTranscript
+                  ? 'Your final transcript remains available below.'
+                  : 'No final transcript was captured.',
+              textAlign: TextAlign.center,
+              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                color: AppColors.secondaryText,
               ),
             ),
           ],
@@ -200,9 +245,10 @@ class _SessionIntro extends StatelessWidget {
           controller.state == LiveSessionState.ready
               ? 'Ready to go live?'
               : 'Live translation',
-          style: Theme.of(
-            context,
-          ).textTheme.headlineMedium?.copyWith(color: AppColors.primaryStrong),
+          style: Theme.of(context).textTheme.headlineMedium?.copyWith(
+            color: AppColors.primaryStrong,
+            fontWeight: FontWeight.w700,
+          ),
         ),
         const SizedBox(height: 6),
         Text(
@@ -235,27 +281,28 @@ class _SessionStateCard extends StatelessWidget {
 
     return Container(
       key: const Key('session_state_card'),
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       decoration: _cardDecoration(),
       child: Row(
         children: [
           Container(
-            width: 42,
-            height: 42,
+            width: 38,
+            height: 38,
             decoration: BoxDecoration(
               color: statusColor.withValues(alpha: 0.1),
-              borderRadius: BorderRadius.circular(12),
+              borderRadius: BorderRadius.circular(10),
             ),
             child: Icon(
               _statusIcon(state, controller.selectedAudioSource),
               color: statusColor,
-              size: 22,
+              size: 20,
             ),
           ),
           const SizedBox(width: 12),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
               children: [
                 Row(
                   children: [
@@ -265,18 +312,21 @@ class _SessionStateCard extends StatelessWidget {
                         key: const Key('session_status'),
                         style: Theme.of(
                           context,
-                        ).textTheme.titleMedium?.copyWith(color: statusColor),
+                        ).textTheme.titleMedium?.copyWith(
+                          color: statusColor,
+                          fontWeight: FontWeight.w600,
+                        ),
                       ),
                     ),
                     if (state == LiveSessionState.listening) ...[
                       const SizedBox(width: 8),
                       Container(
                         padding: const EdgeInsets.symmetric(
-                          horizontal: 8,
-                          vertical: 3,
+                          horizontal: 7,
+                          vertical: 2.5,
                         ),
                         decoration: BoxDecoration(
-                          color: AppColors.live.withValues(alpha: 0.1),
+                          color: AppColors.live.withValues(alpha: 0.12),
                           borderRadius: BorderRadius.circular(99),
                         ),
                         child: const Row(
@@ -290,7 +340,7 @@ class _SessionStateCard extends StatelessWidget {
                               ),
                               child: SizedBox.square(dimension: 6),
                             ),
-                            SizedBox(width: 5),
+                            SizedBox(width: 4),
                             Text(
                               'LIVE',
                               key: Key('live_status_badge'),
@@ -304,33 +354,38 @@ class _SessionStateCard extends StatelessWidget {
                           ],
                         ),
                       ),
+                      const SizedBox(width: 6),
+                      const _SpeechBars(),
                     ],
                   ],
                 ),
-                const SizedBox(height: 3),
+                const SizedBox(height: 2),
                 Text(
                   _stateDescription(controller),
-                  style: Theme.of(context).textTheme.bodySmall,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: AppColors.secondaryText,
+                  ),
                 ),
               ],
             ),
           ),
-          const SizedBox(width: 12),
+          const SizedBox(width: 10),
           Row(
             mainAxisSize: MainAxisSize.min,
             children: [
               if (loading) ...[
                 const SizedBox.square(
-                  dimension: 20,
+                  dimension: 18,
                   child: CircularProgressIndicator(strokeWidth: 2.2),
                 ),
-                const SizedBox(width: 10),
+                const SizedBox(width: 8),
               ],
               Text(
                 _formatDuration(controller.elapsed),
                 key: const Key('session_timer'),
                 style: Theme.of(context).textTheme.titleLarge?.copyWith(
                   color: AppColors.text,
+                  fontWeight: FontWeight.w600,
                   fontFeatures: const [FontFeature.tabularFigures()],
                 ),
               ),
@@ -412,12 +467,14 @@ class _TranscriptSection extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final title =
+        controller.hasStoppedSession ? 'Transcript Preview' : 'Transcript';
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Row(
           children: [
-            Text('Transcript', style: Theme.of(context).textTheme.titleMedium),
+            Text(title, style: Theme.of(context).textTheme.titleMedium),
             const Spacer(),
             if (controller.translationEnabled)
               Container(
@@ -511,7 +568,7 @@ class _TranscriptContent extends StatelessWidget {
                         'live-${segment.streamId ?? ''}-${segment.segmentId}',
                       ),
                       style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                        color: AppColors.secondaryText,
+                        color: AppColors.text.withValues(alpha: 0.8),
                         fontStyle: segment.isFinal
                             ? FontStyle.normal
                             : FontStyle.italic,
@@ -578,13 +635,13 @@ class _SessionControls extends StatelessWidget {
     return Container(
       key: const Key('session_controls'),
       width: double.infinity,
-      padding: const EdgeInsets.fromLTRB(20, 12, 20, 16),
+      padding: const EdgeInsets.fromLTRB(20, 14, 20, 16),
       decoration: const BoxDecoration(
         color: AppColors.card,
         border: Border(top: BorderSide(color: AppColors.border)),
         boxShadow: [
           BoxShadow(
-            color: Color(0x103444CD),
+            color: Color(0x0A3444CD),
             blurRadius: 20,
             offset: Offset(0, -4),
           ),
@@ -636,6 +693,12 @@ class _SessionControls extends StatelessWidget {
           children: [
             Expanded(
               child: FilledButton.icon(
+                style: FilledButton.styleFrom(
+                  backgroundColor: AppColors.card,
+                  foregroundColor: AppColors.primaryStrong,
+                  side: const BorderSide(color: AppColors.primary, width: 1.5),
+                  elevation: 0,
+                ),
                 onPressed: () => unawaited(controller.pause()),
                 icon: const Icon(Icons.pause_rounded),
                 label: const Text('Pause'),
@@ -785,13 +848,14 @@ class _SpeechBars extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return const Row(
-      crossAxisAlignment: CrossAxisAlignment.center,
+      crossAxisAlignment: CrossAxisAlignment.end,
+      mainAxisSize: MainAxisSize.min,
       children: [
         _SpeechBar(height: 10),
-        SizedBox(width: 3),
-        _SpeechBar(height: 18),
-        SizedBox(width: 3),
-        _SpeechBar(height: 13),
+        SizedBox(width: 2.5),
+        _SpeechBar(height: 16),
+        SizedBox(width: 2.5),
+        _SpeechBar(height: 12),
       ],
     );
   }

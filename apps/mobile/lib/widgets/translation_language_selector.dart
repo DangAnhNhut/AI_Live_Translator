@@ -63,6 +63,9 @@ class TranslationLanguageSelector extends StatelessWidget {
                       'Target',
                       style: Theme.of(context).textTheme.labelMedium?.copyWith(
                         color: AppColors.secondaryText,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                        letterSpacing: 0.5,
                       ),
                     ),
                     DropdownButtonHideUnderline(
@@ -72,7 +75,14 @@ class TranslationLanguageSelector extends StatelessWidget {
                         isExpanded: true,
                         isDense: true,
                         borderRadius: BorderRadius.circular(AppRadii.control),
-                        icon: const Icon(Icons.expand_more_rounded),
+                        icon: const Icon(
+                          Icons.expand_more_rounded,
+                          color: AppColors.primaryStrong,
+                        ),
+                        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                          fontWeight: FontWeight.w600,
+                          color: AppColors.text,
+                        ),
                         onChanged: enabled
                             ? (value) {
                                 if (value != null) {
@@ -119,9 +129,12 @@ class _LanguageField extends StatelessWidget {
         children: [
           Text(
             label,
-            style: Theme.of(
-              context,
-            ).textTheme.labelMedium?.copyWith(color: AppColors.secondaryText),
+            style: Theme.of(context).textTheme.labelMedium?.copyWith(
+              color: AppColors.secondaryText,
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 0.5,
+            ),
           ),
           const SizedBox(height: 10),
           Text(

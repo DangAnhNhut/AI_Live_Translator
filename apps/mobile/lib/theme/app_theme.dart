@@ -17,7 +17,7 @@ abstract final class AppColors {
 }
 
 abstract final class AppRadii {
-  static const control = 8.0;
+  static const control = 12.0;
   static const card = 16.0;
 }
 
@@ -122,8 +122,8 @@ ThemeData buildAppTheme() {
       titleTextStyle: TextStyle(
         fontFamily: 'Plus Jakarta Sans',
         fontSize: 20,
-        fontWeight: FontWeight.w600,
-        color: AppColors.text,
+        fontWeight: FontWeight.w700,
+        color: AppColors.primaryStrong,
       ),
     ),
     filledButtonTheme: FilledButtonThemeData(
