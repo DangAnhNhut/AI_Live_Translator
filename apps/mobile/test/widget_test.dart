@@ -6,6 +6,7 @@ import 'package:ai_live_translator_mobile/services/microphone_capture_service.da
 import 'package:ai_live_translator_mobile/services/microphone_permission_service.dart';
 import 'package:ai_live_translator_mobile/services/stt_websocket_service.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter/material.dart';
 
 class FakeAppPermissionGateway implements MicrophonePermissionGateway {
   @override
@@ -70,6 +71,9 @@ void main() {
 
     expect(find.text('Live Session'), findsOneWidget);
     expect(find.text('Ready'), findsOneWidget);
+
+    final scaffold = tester.widget<Scaffold>(find.byType(Scaffold));
+    expect(scaffold.backgroundColor, const Color(0xFFF6F5FF));
 
     await tester.ensureVisible(find.text('Start'));
     await tester.pump();

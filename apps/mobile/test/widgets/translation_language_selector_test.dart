@@ -21,6 +21,8 @@ void main() {
 
     expect(find.text('Source'), findsOneWidget);
     expect(find.text('Vietnamese'), findsOneWidget);
+    expect(find.byKey(const Key('translation_selector_card')), findsOneWidget);
+    expect(find.byKey(const Key('translation_target_field')), findsOneWidget);
     final dropdown = tester.widget<DropdownButton<TranslationTargetLanguage>>(
       find.byKey(const Key('translation_target_selector')),
     );
@@ -51,5 +53,27 @@ void main() {
     expect(dropdown.onChanged, isNull);
     expect(find.textContaining('🇺🇸'), findsNothing);
     expect(find.textContaining('🇻🇳'), findsNothing);
+  });
+
+  testWidgets('reports the selected translation target', (tester) async {
+    TranslationTargetLanguage? selected;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: TranslationLanguageSelector(
+            selectedTarget: TranslationTargetLanguage.english,
+            enabled: true,
+            onChanged: (value) => selected = value,
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.byKey(const Key('translation_target_selector')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Japanese · ja').last);
+    await tester.pumpAndSettle();
+
+    expect(selected, TranslationTargetLanguage.japanese);
   });
 }

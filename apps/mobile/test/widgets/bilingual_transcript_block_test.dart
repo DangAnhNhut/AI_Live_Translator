@@ -36,6 +36,10 @@ void main() {
     expect(find.text('Chung ta bat dau.'), findsOneWidget);
     expect(find.text('TRANSLATION · EN'), findsOneWidget);
     expect(find.text('Translating...'), findsOneWidget);
+    expect(
+      find.byKey(const Key('translation_pending_indicator')),
+      findsOneWidget,
+    );
   });
 
   testWidgets('final shows translated text in the same component', (
@@ -45,6 +49,7 @@ void main() {
     await pump(tester, TranslationStatus.finalResult);
 
     expect(find.byType(BilingualTranscriptBlock), findsOneWidget);
+    expect(find.byKey(const Key('bilingual_transcript_card')), findsOneWidget);
     expect(find.text('We will begin.'), findsOneWidget);
     expect(find.text('Translating...'), findsNothing);
   });
@@ -61,5 +66,28 @@ void main() {
       findsOneWidget,
     );
     expect(find.byKey(const Key('translation_failed_surface')), findsOneWidget);
+  });
+
+  testWidgets('stopped session presents pending translation as unavailable', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: BilingualTranscriptBlock(
+            utterance: utterance(TranslationStatus.pending),
+            sessionEnded: true,
+          ),
+        ),
+      ),
+    );
+
+    expect(find.text('Chung ta bat dau.'), findsOneWidget);
+    expect(find.text('Translation unavailable'), findsOneWidget);
+    expect(find.text('Translating...'), findsNothing);
+    expect(
+      find.byKey(const Key('translation_pending_indicator')),
+      findsNothing,
+    );
   });
 }

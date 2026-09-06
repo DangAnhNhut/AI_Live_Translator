@@ -10,11 +10,13 @@ import 'package:ai_live_translator_mobile/services/microphone_permission_service
 import 'package:ai_live_translator_mobile/services/stt_websocket_service.dart';
 import 'package:ai_live_translator_mobile/services/transcript_file_saver.dart';
 import 'package:ai_live_translator_mobile/session/live_session_controller.dart';
+import 'package:ai_live_translator_mobile/session/live_session_state.dart';
 import 'package:ai_live_translator_mobile/session/session_timer.dart';
 import 'package:ai_live_translator_mobile/translation/translation_domain.dart';
 import 'package:ai_live_translator_mobile/widgets/bilingual_transcript_block.dart';
 import 'package:ai_live_translator_mobile/widgets/translation_language_selector.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 class FakeScreenPermissionGateway implements MicrophonePermissionGateway {
@@ -32,10 +34,12 @@ class FakeScreenPermissionGateway implements MicrophonePermissionGateway {
   Future<bool> openAppSettings() async => true;
 }
 
-class FakeScreenAudioInput implements MobileAudioInput {
+class FakeScreenAudioInput implements MobileMicrophoneCapture {
   final StreamController<Uint8List> audioController =
       StreamController<Uint8List>.broadcast();
   int startCalls = 0;
+  int pauseCalls = 0;
+  int resumeCalls = 0;
   int stopCalls = 0;
 
   @override
@@ -45,10 +49,14 @@ class FakeScreenAudioInput implements MobileAudioInput {
   }
 
   @override
-  Future<void> pause() async {}
+  Future<void> pause() async {
+    pauseCalls++;
+  }
 
   @override
-  Future<void> resume() async {}
+  Future<void> resume() async {
+    resumeCalls++;
+  }
 
   @override
   Future<void> stop() async {
@@ -64,6 +72,9 @@ class FakeScreenTransport implements SttSessionTransport {
       StreamController<SttSessionEvent>.broadcast();
   Completer<void>? pendingConnect;
   Object? connectError;
+  int connectCalls = 0;
+  int stopCalls = 0;
+  int disconnectCalls = 0;
 
   @override
   Stream<SttSessionEvent> get events => eventController.stream;
@@ -72,6 +83,7 @@ class FakeScreenTransport implements SttSessionTransport {
   Future<void> connect({
     SttSessionStartOptions options = const SttSessionStartOptions(),
   }) async {
+    connectCalls++;
     await pendingConnect?.future;
     if (connectError != null) {
       throw connectError!;
@@ -82,10 +94,14 @@ class FakeScreenTransport implements SttSessionTransport {
   Future<void> sendAudio(Uint8List audio) async {}
 
   @override
-  Future<void> disconnect() async {}
+  Future<void> disconnect() async {
+    disconnectCalls++;
+  }
 
   @override
-  Future<void> stop() async {}
+  Future<void> stop() async {
+    stopCalls++;
+  }
 }
 
 class FakeScreenClock implements SessionClock {
@@ -189,10 +205,7 @@ void main() {
     );
     await tester.pump();
 
-    expect(
-      find.text('Capture playback audio from supported apps.'),
-      findsOneWidget,
-    );
+    expect(find.text('Capture audio from supported apps.'), findsOneWidget);
 
     await tester.pumpWidget(const SizedBox.shrink());
     await transport.eventController.close();
@@ -400,6 +413,8 @@ void main() {
     expect(find.text('Live Session'), findsOneWidget);
     expect(find.text('Ready'), findsOneWidget);
     expect(find.text('00:00'), findsOneWidget);
+    expect(find.byKey(const Key('session_state_card')), findsOneWidget);
+    expect(find.byKey(const Key('session_controls')), findsOneWidget);
     expect(find.widgetWithText(FilledButton, 'Start'), findsOneWidget);
     expect(find.text('Stop'), findsNothing);
     expect(find.text('Save Transcript'), findsNothing);
@@ -475,6 +490,18 @@ void main() {
     );
 
     expect(find.text('Listening'), findsOneWidget);
+    final liveBadge = tester.widget<Text>(
+      find.byKey(const Key('live_status_badge')),
+    );
+    expect(liveBadge.data, 'LIVE');
+    expect(liveBadge.style?.color, const Color(0xFF15803D));
+    final liveIndicator = tester.widget<DecoratedBox>(
+      find.byKey(const Key('live_status_indicator')),
+    );
+    expect(
+      (liveIndicator.decoration as BoxDecoration).color,
+      const Color(0xFF22C55E),
+    );
     expect(find.widgetWithText(FilledButton, 'Pause'), findsOneWidget);
     expect(find.widgetWithText(OutlinedButton, 'Stop'), findsOneWidget);
 
@@ -497,12 +524,54 @@ void main() {
     );
 
     expect(find.text('Paused'), findsOneWidget);
+    expect(find.byKey(const Key('session_state_card')), findsOneWidget);
     expect(find.widgetWithText(FilledButton, 'Resume'), findsOneWidget);
     expect(find.widgetWithText(OutlinedButton, 'Stop'), findsOneWidget);
 
     await tester.runAsync(controller.stop);
     controller.dispose();
     await transport.eventController.close();
+  });
+
+  testWidgets('Pause Resume and Stop controls call the existing controller', (
+    tester,
+  ) async {
+    final transport = FakeScreenTransport();
+    final audioInput = FakeScreenAudioInput();
+    final controller = LiveSessionController(
+      permissionGateway: FakeScreenPermissionGateway(),
+      transport: transport,
+      microphoneCapture: audioInput,
+    );
+    await controller.start();
+    await tester.pumpWidget(
+      MaterialApp(home: LiveSessionScreen(controller: controller)),
+    );
+
+    await tapVisible(tester, find.widgetWithText(FilledButton, 'Pause'));
+    await tester.pump();
+    expect(audioInput.pauseCalls, 1);
+    expect(controller.state, LiveSessionState.paused);
+
+    await tapVisible(tester, find.widgetWithText(FilledButton, 'Resume'));
+    await tester.pump();
+    expect(audioInput.resumeCalls, 1);
+    expect(controller.state, LiveSessionState.listening);
+
+    final stopButton = tester.widget<OutlinedButton>(
+      find.widgetWithText(OutlinedButton, 'Stop'),
+    );
+    await tester.runAsync(() async {
+      stopButton.onPressed!();
+      await controller.stop();
+    });
+    await tester.pumpAndSettle();
+    expect(transport.stopCalls, 1);
+    expect(controller.state, LiveSessionState.ready);
+
+    controller.dispose();
+    await transport.eventController.close();
+    await audioInput.audioController.close();
   });
 
   testWidgets('reconnecting displays status with progress and Stop', (
@@ -527,6 +596,7 @@ void main() {
 
     expect(find.text('Reconnecting'), findsOneWidget);
     expect(find.byType(CircularProgressIndicator), findsOneWidget);
+    expect(find.byKey(const Key('session_state_card')), findsOneWidget);
     expect(find.widgetWithText(OutlinedButton, 'Stop'), findsOneWidget);
 
     await tester.runAsync(controller.stop);
@@ -557,6 +627,7 @@ void main() {
 
     expect(find.text('Error'), findsOneWidget);
     expect(find.text('STT provider is unavailable.'), findsOneWidget);
+    expect(find.byKey(const Key('session_error_card')), findsOneWidget);
     expect(find.text('Retry'), findsNothing);
     expect(find.widgetWithText(OutlinedButton, 'Stop'), findsOneWidget);
 
@@ -586,6 +657,7 @@ void main() {
     await tester.pump();
 
     expect(find.text('Ready'), findsOneWidget);
+    expect(find.text('Session complete'), findsOneWidget);
     expect(find.widgetWithText(FilledButton, 'Start'), findsOneWidget);
     expect(find.text('Stop'), findsNothing);
     expect(find.text('00:00'), findsOneWidget);
@@ -622,6 +694,55 @@ void main() {
     );
     expect(saveButton.onPressed, isNull);
     expect(find.text('xin chào hôm'), findsNothing);
+    expect(find.text('No final transcript was captured.'), findsOneWidget);
+    expect(
+      find.text('Your final transcript remains available below.'),
+      findsNothing,
+    );
+    controller.dispose();
+    await transport.eventController.close();
+  });
+
+  testWidgets('Stop turns an unresolved translation into a terminal state', (
+    tester,
+  ) async {
+    final transport = FakeScreenTransport();
+    final controller = LiveSessionController(
+      permissionGateway: FakeScreenPermissionGateway(),
+      transport: transport,
+    );
+    await controller.start();
+    transport.eventController.add(
+      const SttTranslationEvent(
+        TranslationPendingEvent(
+          streamId: 'stream_A',
+          utteranceId: 'utt_000001',
+          sourceSegmentIds: ['seg_1'],
+          sourceText: 'Bản gốc vẫn còn.',
+          sourceLanguage: 'vi',
+          targetLanguage: TranslationTargetLanguage.english,
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.runAsync(controller.stop);
+
+    await tester.pumpWidget(
+      MaterialApp(home: LiveSessionScreen(controller: controller)),
+    );
+
+    expect(find.text('Bản gốc vẫn còn.'), findsOneWidget);
+    expect(find.text('Translation unavailable'), findsOneWidget);
+    expect(find.text('Translating...'), findsNothing);
+    expect(
+      find.byKey(const Key('translation_pending_indicator')),
+      findsNothing,
+    );
+    expect(
+      controller.translationState.utterances.single.status,
+      TranslationStatus.pending,
+    );
+
     controller.dispose();
     await transport.eventController.close();
   });
@@ -831,6 +952,83 @@ void main() {
     await systemAudio.audioController.close();
   });
 
+  testWidgets(
+    'listening status icon reflects the selected system audio source',
+    (tester) async {
+      final transport = FakeScreenTransport();
+      final systemAudio = FakeScreenAudioInput();
+      final controller = LiveSessionController(
+        permissionGateway: FakeScreenPermissionGateway(),
+        transport: transport,
+        systemAudioInput: systemAudio,
+        systemAudioSupportQuery: () async => true,
+      );
+      await controller.audioSourceSupportReady;
+      controller.selectAudioSource(MobileAudioSource.systemAudio);
+      await controller.start();
+
+      await tester.pumpWidget(
+        MaterialApp(home: LiveSessionScreen(controller: controller)),
+      );
+
+      final statusIcon = tester.widget<Icon>(
+        find.descendant(
+          of: find.byKey(const Key('session_state_card')),
+          matching: find.byType(Icon),
+        ),
+      );
+      expect(find.text('System Audio active'), findsOneWidget);
+      expect(statusIcon.icon, Icons.computer_rounded);
+
+      await tester.runAsync(controller.stop);
+      controller.dispose();
+      await transport.eventController.close();
+      await systemAudio.audioController.close();
+    },
+  );
+
+  testWidgets(
+    'audio source supporting copy fits at normal Android phone width',
+    (tester) async {
+      tester.view.physicalSize = const Size(360, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final transport = FakeScreenTransport();
+      final systemAudio = FakeScreenAudioInput();
+      final controller = LiveSessionController(
+        permissionGateway: FakeScreenPermissionGateway(),
+        transport: transport,
+        systemAudioInput: systemAudio,
+        systemAudioSupportQuery: () async => true,
+      );
+      await controller.audioSourceSupportReady;
+
+      await tester.pumpWidget(
+        MaterialApp(home: LiveSessionScreen(controller: controller)),
+      );
+
+      final microphoneCopy = tester.renderObject<RenderParagraph>(
+        find.text('Capture speech from your microphone.'),
+      );
+      final systemAudioCopy = tester.renderObject<RenderParagraph>(
+        find.text('Capture audio from supported apps.'),
+      );
+      expect(microphoneCopy.didExceedMaxLines, isFalse);
+      expect(systemAudioCopy.didExceedMaxLines, isFalse);
+      expect(
+        tester.getSize(find.byKey(const Key('audio_source_microphone'))).height,
+        tester
+            .getSize(find.byKey(const Key('audio_source_system_audio')))
+            .height,
+      );
+
+      controller.dispose();
+      await transport.eventController.close();
+      await systemAudio.audioController.close();
+    },
+  );
+
   testWidgets('selecting system audio requests no permission until Start', (
     tester,
   ) async {
@@ -860,7 +1058,7 @@ void main() {
     await systemAudio.audioController.close();
   });
 
-  testWidgets('unsupported system audio is visibly unavailable', (
+  testWidgets('unsupported system audio is hidden from the selector', (
     tester,
   ) async {
     final transport = FakeScreenTransport();
@@ -876,18 +1074,82 @@ void main() {
       MaterialApp(home: LiveSessionScreen(controller: controller)),
     );
 
-    final option = tester.widget<Semantics>(
-      find.byKey(const Key('audio_source_system_audio')),
-    );
-    expect(option.properties.enabled, isFalse);
-    expect(find.text('Requires Android 10 or later'), findsOneWidget);
+    expect(find.byKey(const Key('audio_source_system_audio')), findsNothing);
+    expect(find.text('System Audio'), findsNothing);
 
-    await tester.tap(find.byKey(const Key('audio_source_system_audio')));
     expect(controller.selectedAudioSource, MobileAudioSource.microphone);
 
     controller.dispose();
     await transport.eventController.close();
     await systemAudio.audioController.close();
+  });
+
+  testWidgets('normal Android phone width renders without overflow', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(360, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final transport = FakeScreenTransport();
+    final controller = LiveSessionController(
+      permissionGateway: FakeScreenPermissionGateway(),
+      transport: transport,
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(home: LiveSessionScreen(controller: controller)),
+    );
+    await tester.pump();
+
+    expect(tester.takeException(), isNull);
+    expect(find.byKey(const Key('live_session_scroll_view')), findsOneWidget);
+
+    controller.dispose();
+    await transport.eventController.close();
+  });
+
+  testWidgets('recoverable Error retries at normal Android phone width', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(360, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final transport = FakeScreenTransport()
+      ..connectError = const SttSessionException(
+        code: 'provider_unavailable',
+        message: 'STT provider is temporarily unavailable.',
+        recoverable: true,
+      );
+    final controller = LiveSessionController(
+      permissionGateway: FakeScreenPermissionGateway(),
+      transport: transport,
+    );
+    await controller.start();
+
+    await tester.pumpWidget(
+      MaterialApp(home: LiveSessionScreen(controller: controller)),
+    );
+    await tester.pump();
+
+    expect(find.text('Error'), findsOneWidget);
+    expect(find.widgetWithText(FilledButton, 'Retry'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+
+    transport.connectError = null;
+    await tapVisible(tester, find.widgetWithText(FilledButton, 'Retry'));
+    await tester.pumpAndSettle();
+
+    expect(transport.connectCalls, 2);
+    expect(find.text('Listening'), findsOneWidget);
+    expect(find.widgetWithText(FilledButton, 'Pause'), findsOneWidget);
+    expect(find.widgetWithText(OutlinedButton, 'Stop'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+
+    await tester.runAsync(controller.stop);
+    controller.dispose();
+    await transport.eventController.close();
   });
 
   testWidgets(

@@ -1,11 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../services/audio_input.dart';
-
-const _primaryIndigo = Color(0xFF4F5FE7);
-const _textPrimary = Color(0xFF111827);
-const _textSecondary = Color(0xFF64748B);
-const _border = Color(0xFFE2E8F0);
+import '../theme/app_theme.dart';
 
 class AudioSourceSelector extends StatelessWidget {
   const AudioSourceSelector({
@@ -23,47 +19,56 @@ class AudioSourceSelector extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final microphone = _AudioSourceOption(
+      semanticsKey: const Key('audio_source_microphone'),
+      title: 'Microphone',
+      description: 'Capture speech from your microphone.',
+      icon: Icons.mic_rounded,
+      selected: selectedSource == MobileAudioSource.microphone,
+      enabled: enabled,
+      onTap: () => onSelected(MobileAudioSource.microphone),
+    );
+    final systemAudio = _AudioSourceOption(
+      semanticsKey: const Key('audio_source_system_audio'),
+      title: 'System Audio',
+      description: 'Capture audio from supported apps.',
+      icon: Icons.computer_rounded,
+      selected: selectedSource == MobileAudioSource.systemAudio,
+      enabled: enabled,
+      onTap: () => onSelected(MobileAudioSource.systemAudio),
+    );
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          'Audio Source',
-          style: Theme.of(context).textTheme.titleMedium?.copyWith(
-            color: _textPrimary,
-            fontWeight: FontWeight.w600,
-          ),
-        ),
+        Text('Audio Source', style: Theme.of(context).textTheme.titleMedium),
         const SizedBox(height: 12),
-        Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Expanded(
-              child: _AudioSourceOption(
-                semanticsKey: const Key('audio_source_microphone'),
-                title: 'Microphone',
-                description: "Capture speech from this device's microphone.",
-                icon: Icons.mic_none_rounded,
-                selected: selectedSource == MobileAudioSource.microphone,
-                enabled: enabled,
-                onTap: () => onSelected(MobileAudioSource.microphone),
-              ),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: _AudioSourceOption(
-                semanticsKey: const Key('audio_source_system_audio'),
-                title: 'System Audio',
-                description: systemAudioSupported
-                    ? 'Capture playback audio from supported apps.'
-                    : 'Requires Android 10 or later',
-                icon: Icons.graphic_eq_rounded,
-                selected: selectedSource == MobileAudioSource.systemAudio,
-                enabled: enabled && systemAudioSupported,
-                onTap: () => onSelected(MobileAudioSource.systemAudio),
-              ),
-            ),
-          ],
-        ),
+        if (!systemAudioSupported)
+          microphone
+        else
+          LayoutBuilder(
+            builder: (context, constraints) {
+              if (constraints.maxWidth < 320) {
+                return Column(
+                  children: [
+                    microphone,
+                    const SizedBox(height: 12),
+                    systemAudio,
+                  ],
+                );
+              }
+              return IntrinsicHeight(
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Expanded(child: microphone),
+                    const SizedBox(width: 12),
+                    Expanded(child: systemAudio),
+                  ],
+                ),
+              );
+            },
+          ),
       ],
     );
   }
@@ -100,64 +105,106 @@ class _AudioSourceOption extends StatelessWidget {
         duration: const Duration(milliseconds: 150),
         opacity: enabled ? 1 : 0.58,
         child: Material(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(12),
+          color: AppColors.card,
+          borderRadius: BorderRadius.circular(AppRadii.card),
           child: InkWell(
             onTap: enabled ? onTap : null,
-            borderRadius: BorderRadius.circular(12),
+            borderRadius: BorderRadius.circular(AppRadii.card),
             child: AnimatedContainer(
               duration: const Duration(milliseconds: 150),
-              constraints: const BoxConstraints(minHeight: 112),
-              padding: const EdgeInsets.all(12),
+              constraints: const BoxConstraints(minHeight: 132),
+              padding: const EdgeInsets.all(16),
               decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(12),
+                borderRadius: BorderRadius.circular(AppRadii.card),
                 border: Border.all(
-                  color: selected ? _primaryIndigo : _border,
+                  color: selected ? AppColors.primary : AppColors.border,
                   width: selected ? 2 : 1,
                 ),
                 color: selected
-                    ? _primaryIndigo.withValues(alpha: 0.06)
-                    : Colors.white,
+                    ? AppColors.primary.withValues(alpha: 0.055)
+                    : AppColors.card,
+                boxShadow: const [
+                  BoxShadow(
+                    color: Color(0x083444CD),
+                    blurRadius: 16,
+                    offset: Offset(0, 4),
+                  ),
+                ],
               ),
               child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisAlignment: MainAxisAlignment.center,
                 children: [
                   Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      Icon(icon, size: 21, color: _primaryIndigo),
-                      const Spacer(),
                       Icon(
-                        selected
-                            ? Icons.radio_button_checked_rounded
-                            : Icons.radio_button_unchecked_rounded,
-                        size: 20,
-                        color: selected ? _primaryIndigo : _textSecondary,
+                        icon,
+                        size: 28,
+                        color: selected
+                            ? AppColors.primaryStrong
+                            : AppColors.secondaryText,
                       ),
+                      if (selected) ...[
+                        const SizedBox(width: 8),
+                        const _ListeningBars(),
+                      ],
                     ],
                   ),
                   const SizedBox(height: 10),
                   Text(
                     title,
-                    style: const TextStyle(
-                      color: _textPrimary,
+                    textAlign: TextAlign.center,
+                    style: Theme.of(context).textTheme.bodyLarge?.copyWith(
                       fontWeight: FontWeight.w600,
-                      fontSize: 14,
                     ),
                   ),
                   const SizedBox(height: 4),
                   Text(
                     description,
-                    style: const TextStyle(
-                      color: _textSecondary,
-                      fontSize: 12,
-                      height: 1.35,
-                    ),
+                    textAlign: TextAlign.center,
+                    style: Theme.of(context).textTheme.bodySmall,
                   ),
                 ],
               ),
             ),
           ),
         ),
+      ),
+    );
+  }
+}
+
+class _ListeningBars extends StatelessWidget {
+  const _ListeningBars();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Row(
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        _Bar(height: 9),
+        SizedBox(width: 3),
+        _Bar(height: 17),
+        SizedBox(width: 3),
+        _Bar(height: 12),
+      ],
+    );
+  }
+}
+
+class _Bar extends StatelessWidget {
+  const _Bar({required this.height});
+
+  final double height;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 3,
+      height: height,
+      decoration: BoxDecoration(
+        color: AppColors.primary,
+        borderRadius: BorderRadius.circular(2),
       ),
     );
   }

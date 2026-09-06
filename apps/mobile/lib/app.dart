@@ -9,6 +9,7 @@ import 'services/microphone_capture_service.dart';
 import 'services/microphone_permission_service.dart';
 import 'services/stt_websocket_service.dart';
 import 'session/live_session_controller.dart';
+import 'theme/app_theme.dart';
 
 class AiLiveTranslatorApp extends StatefulWidget {
   const AiLiveTranslatorApp({
@@ -64,10 +65,7 @@ class _AiLiveTranslatorAppState extends State<AiLiveTranslatorApp> {
     return MaterialApp(
       title: 'AI Live Translator',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
-        useMaterial3: true,
-      ),
+      theme: buildAppTheme(),
       home: LiveSessionScreen(
         controller: _controller,
         debugControls: widget.debugControls,
