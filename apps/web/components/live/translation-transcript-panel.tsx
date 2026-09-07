@@ -26,6 +26,8 @@ type TranslationTranscriptPanelProps = {
   translationExpected: boolean;
   emptyTitle?: string;
   emptyDescription?: string;
+  streamBadgeLabel?: string;
+  sourceBadgeLabel?: string | null;
 };
 
 export function TranslationTranscriptPanel({
@@ -34,6 +36,8 @@ export function TranslationTranscriptPanel({
   translationExpected,
   emptyTitle = "Waiting for speech…",
   emptyDescription = "Recognized speech and translations will appear here.",
+  streamBadgeLabel = "AUDIO STREAM",
+  sourceBadgeLabel = "Audio In",
 }: TranslationTranscriptPanelProps) {
   const endRef = useRef<HTMLDivElement>(null);
   const [autoFollow, setAutoFollow] = useState(true);
@@ -143,7 +147,7 @@ export function TranslationTranscriptPanel({
               <path d="M18 5v13" />
               <path d="M22 10v3" />
             </svg>
-            <span>AUDIO STREAM</span>
+            <span>{streamBadgeLabel}</span>
           </div>
 
           {/* Decorative Waveform Equalizer (Activity indication only: NO fake dB) */}
@@ -279,9 +283,11 @@ export function TranslationTranscriptPanel({
               ORIGINAL · VIETNAMESE (VI)
             </span>
           </div>
-          <span className="px-2 py-0.5 rounded bg-white text-slate-600 text-[10px] font-bold border border-slate-200 shadow-2xs">
-            Audio In
-          </span>
+          {sourceBadgeLabel ? (
+            <span className="px-2 py-0.5 rounded bg-white text-slate-600 text-[10px] font-bold border border-slate-200 shadow-2xs">
+              {sourceBadgeLabel}
+            </span>
+          ) : null}
         </div>
 
         {/* Right Column Header: Translation Target */}
@@ -317,7 +323,7 @@ export function TranslationTranscriptPanel({
 
       {/* 3. Transcript Feed & Scroll Workspace */}
       <div
-        className="flex-1 overflow-y-auto px-6 py-3 space-y-3 custom-scroll"
+        className="flex-1 overflow-y-auto px-6 pt-3 pb-8 space-y-3 custom-scroll"
         aria-live="polite"
         aria-relevant="additions text"
         data-testid="bilingual-transcript-feed"
