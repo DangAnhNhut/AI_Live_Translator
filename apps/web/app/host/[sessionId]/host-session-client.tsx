@@ -52,80 +52,6 @@ type HostSessionClientProps = {
 
 type CleanupReason = "deliberate" | "capture-ended" | "error" | "unmount";
 
-function isPreviewLive(): boolean {
-  if (typeof window === "undefined") return false;
-  return new URLSearchParams(window.location.search).get("preview") === "live";
-}
-
-const DEMO_PREVIEW_TRANSLATION_STATE = {
-  configurations: [
-    {
-      streamId: "stream_demo",
-      sourceLanguage: "vi" as const,
-      targetLanguage: "en" as const,
-    },
-  ],
-  utterances: [
-    {
-      streamId: "stream_demo",
-      utteranceId: "utt_001",
-      sourceSegmentIds: ["seg_001"],
-      sourceText:
-        "Chào mừng quý vị và các bạn đã tham gia buổi thuyết trình trực tiếp hôm nay.",
-      sourceLanguage: "vi" as const,
-      targetLanguage: "en" as const,
-      translatedText:
-        "Welcome everyone to today's live presentation and technology overview.",
-      status: "final" as const,
-    },
-    {
-      streamId: "stream_demo",
-      utteranceId: "utt_002",
-      sourceSegmentIds: ["seg_002"],
-      sourceText:
-        "Chúng tôi đang chia sẻ giải pháp dịch thuật đa ngôn ngữ thời gian thực trên giao diện web.",
-      sourceLanguage: "vi" as const,
-      targetLanguage: "en" as const,
-      translatedText:
-        "We are demonstrating real-time multilingual translation capabilities on the web interface.",
-      status: "final" as const,
-    },
-    {
-      streamId: "stream_demo",
-      utteranceId: "utt_003",
-      sourceSegmentIds: ["seg_003"],
-      sourceText:
-        "Hệ thống tự động phát hiện giọng nói và căn chỉnh song ngữ chính xác theo từng phát ngôn.",
-      sourceLanguage: "vi" as const,
-      targetLanguage: "en" as const,
-      status: "pending" as const,
-    },
-    {
-      streamId: "stream_demo",
-      utteranceId: "utt_004",
-      sourceSegmentIds: ["seg_004"],
-      sourceText:
-        "Đoạn văn bản sau đây minh họa kịch bản khi dịch vụ dịch thuật gặp gián đoạn tạm thời.",
-      sourceLanguage: "vi" as const,
-      targetLanguage: "en" as const,
-      status: "failed" as const,
-      errorCode: "provider_unavailable" as const,
-      errorMessage: "Translation service temporarily unavailable",
-    },
-  ],
-  sessionErrors: [],
-};
-
-const DEMO_PREVIEW_SEGMENTS: readonly TranscriptSegment[] = [
-  {
-    id: "seg_interim_001",
-    streamId: "stream_demo",
-    text: "và bây giờ chúng ta sẽ cùng theo dõi các luồng âm thanh tiếp theo...",
-    language: "vi",
-    kind: "interim",
-  },
-];
-
 export function HostSessionClient({ sessionId }: HostSessionClientProps) {
   const producerUrl = useMemo(() => {
     try {
@@ -134,26 +60,15 @@ export function HostSessionClient({ sessionId }: HostSessionClientProps) {
       return null;
     }
   }, []);
-  const [state, setState] = useState<HostSessionState>(() =>
-    isPreviewLive() ? "live" : "ready",
-  );
-  const [audioSelection, setAudioSelection] = useState<HostAudioSelection>(() =>
-    isPreviewLive()
-      ? { selectedSource: "microphone", locked: true }
-      : createHostAudioSelection(),
-  );
+  const [state, setState] = useState<HostSessionState>("ready");
+  const [audioSelection, setAudioSelection] =
+    useState<HostAudioSelection>(createHostAudioSelection);
   const [translationSelection, setTranslationSelection] =
-    useState<HostTranslationSelection>(() =>
-      isPreviewLive()
-        ? { targetLanguage: "en", locked: true }
-        : createHostTranslationSelection(),
-    );
-  const [translationState, setTranslationState] = useState(() =>
-    isPreviewLive() ? DEMO_PREVIEW_TRANSLATION_STATE : createTranslationState(),
+    useState<HostTranslationSelection>(createHostTranslationSelection);
+  const [translationState, setTranslationState] = useState(
+    createTranslationState,
   );
-  const [segments, setSegments] = useState<readonly TranscriptSegment[]>(() =>
-    isPreviewLive() ? DEMO_PREVIEW_SEGMENTS : [],
-  );
+  const [segments, setSegments] = useState<readonly TranscriptSegment[]>([]);
   const [captureInfo, setCaptureInfo] = useState<AudioCaptureInfo | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);

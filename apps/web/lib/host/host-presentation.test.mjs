@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { createHostAudioSelection } from "./host-session.ts";
+import { createHostTranslationSelection } from "./host-translation.ts";
+import { createTranslationState } from "../realtime/translation.ts";
 import {
   buildHostReadyConfig,
   buildHostSplitBilingualRow,
@@ -145,4 +148,22 @@ test("presentation timer and breadcrumb remain truthful and local", () => {
   assert.equal(breadcrumb.category, "Live Session");
   assert.equal(breadcrumb.sessionId, "sess_live_456");
   assert.equal("workspace" in breadcrumb, false);
+});
+
+test("production Host runtime starts strictly in clean Ready state without preview injection", () => {
+  const defaultAudio = createHostAudioSelection();
+  assert.deepEqual(defaultAudio, { selectedSource: null, locked: false });
+
+  const defaultTranslation = createHostTranslationSelection();
+  assert.deepEqual(defaultTranslation, { targetLanguage: "en", locked: false });
+
+  const defaultTranslationState = createTranslationState();
+  assert.deepEqual(defaultTranslationState, {
+    configurations: [],
+    utterances: [],
+    sessionErrors: [],
+  });
+
+  assert.equal(shouldShowReadyCanvas("ready"), true);
+  assert.equal(shouldShowLiveWorkspace("ready"), false);
 });
