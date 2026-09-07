@@ -206,6 +206,9 @@ void main() {
     );
     await tester.pump();
 
+    await tester.tap(find.byKey(const Key('home_start_translation_button')));
+    await tester.pumpAndSettle();
+
     expect(find.text('Capture audio from supported apps.'), findsOneWidget);
 
     await tester.pumpWidget(const SizedBox.shrink());
@@ -226,6 +229,10 @@ void main() {
         debugControls: FakeDebugControls(),
       ),
     );
+    await tester.pump();
+
+    await tester.tap(find.byKey(const Key('home_start_translation_button')));
+    await tester.pumpAndSettle();
 
     expect(find.text('DEBUG VERIFICATION MODE'), findsOneWidget);
     await tester.pumpWidget(const SizedBox.shrink());

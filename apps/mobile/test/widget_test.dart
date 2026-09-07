@@ -59,7 +59,9 @@ class FakeAppMicrophoneCapture implements MobileMicrophoneCapture {
 }
 
 void main() {
-  testWidgets('app renders live runtime session screen', (tester) async {
+  testWidgets('app cold starts to home and navigates to live runtime session', (
+    tester,
+  ) async {
     final microphoneCapture = FakeAppMicrophoneCapture();
     await tester.pumpWidget(
       AiLiveTranslatorApp(
@@ -69,11 +71,21 @@ void main() {
       ),
     );
 
-    expect(find.text('Live Session'), findsOneWidget);
-    expect(find.text('Ready'), findsOneWidget);
+    expect(find.text('AI Live Translator'), findsOneWidget);
+    expect(find.text('Start live translation'), findsOneWidget);
+    expect(
+      find.byKey(const Key('home_start_translation_button')),
+      findsOneWidget,
+    );
 
     final scaffold = tester.widget<Scaffold>(find.byType(Scaffold));
     expect(scaffold.backgroundColor, const Color(0xFFF6F5FF));
+
+    await tester.tap(find.byKey(const Key('home_start_translation_button')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Live Session'), findsOneWidget);
+    expect(find.text('Ready'), findsOneWidget);
 
     await tester.ensureVisible(find.text('Start'));
     await tester.pump();

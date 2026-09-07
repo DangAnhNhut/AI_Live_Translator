@@ -29,33 +29,46 @@ class LiveSessionScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: AppColors.background,
-      appBar: AppBar(
-        title: const Text('Live Session'),
-        centerTitle: true,
-      ),
-      body: AnimatedBuilder(
-        animation: controller,
-        builder: (context, _) {
-          if (controller.hasPendingBenchmarkTranscriptRender) {
-            final transcriptRevision =
-                controller.latestBenchmarkTranscriptRevision;
-            WidgetsBinding.instance.addPostFrameCallback((_) {
-              controller.recordBenchmarkTranscriptRendered(transcriptRevision);
-            });
-          }
-          final isStoppedSession = controller.hasStoppedSession;
-          final isLiveActive = !isStoppedSession &&
-              (controller.state == LiveSessionState.listening ||
-                  controller.state == LiveSessionState.paused);
-          return SafeArea(
-            top: false,
-            child: Column(
-              children: [
-                Expanded(
-                  child: SingleChildScrollView(
-                    key: const Key('live_session_scroll_view'),
+    return AnimatedBuilder(
+      animation: controller,
+      builder: (context, _) {
+        if (controller.hasPendingBenchmarkTranscriptRender) {
+          final transcriptRevision =
+              controller.latestBenchmarkTranscriptRevision;
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            controller.recordBenchmarkTranscriptRendered(transcriptRevision);
+          });
+        }
+        final isStoppedSession = controller.hasStoppedSession;
+        final isLiveActive = !isStoppedSession &&
+            (controller.state == LiveSessionState.listening ||
+                controller.state == LiveSessionState.paused);
+        final isSessionActive = controller.state != LiveSessionState.ready;
+
+        return PopScope(
+          canPop: !isSessionActive,
+          onPopInvokedWithResult: (didPop, result) async {
+            if (didPop) {
+              if (controller.hasStoppedSession) {
+                controller.resetToReady();
+              }
+              return;
+            }
+            await _handleBackNavigation(context);
+          },
+          child: Scaffold(
+            backgroundColor: AppColors.background,
+            appBar: AppBar(
+              title: const Text('Live Session'),
+              centerTitle: true,
+            ),
+            body: SafeArea(
+              top: false,
+              child: Column(
+                children: [
+                  Expanded(
+                    child: SingleChildScrollView(
+                      key: const Key('live_session_scroll_view'),
                     padding: const EdgeInsets.fromLTRB(20, 16, 20, 32),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -154,11 +167,12 @@ class LiveSessionScreen extends StatelessWidget {
                 ),
               ],
             ),
-          );
-        },
-      ),
-    );
-  }
+          ),
+        ),
+      );
+    },
+  );
+}
 
   Future<void> _saveTranscript(BuildContext context) async {
     final transcript = controller.finalTranscript;
@@ -177,6 +191,59 @@ class LiveSessionScreen extends StatelessWidget {
     ScaffoldMessenger.of(
       context,
     ).showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  Future<void> _handleBackNavigation(BuildContext context) async {
+    final shouldExit = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: AppColors.card,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(AppRadii.card),
+        ),
+        title: Text(
+          'End live session?',
+          style: Theme.of(dialogContext).textTheme.titleLarge?.copyWith(
+            fontWeight: FontWeight.w700,
+            color: AppColors.text,
+          ),
+        ),
+        content: Text(
+          'End live session and return home?',
+          style: Theme.of(dialogContext).textTheme.bodyMedium?.copyWith(
+            color: AppColors.secondaryText,
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text(
+              'Cancel',
+              style: TextStyle(
+                color: AppColors.secondaryText,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: AppColors.error,
+              foregroundColor: Colors.white,
+            ),
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('End Session'),
+          ),
+        ],
+      ),
+    );
+
+    if (shouldExit == true) {
+      await controller.stop();
+      controller.resetToReady();
+      if (context.mounted) {
+        Navigator.of(context).pop();
+      }
+    }
   }
 }
 

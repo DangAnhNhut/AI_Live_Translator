@@ -479,6 +479,23 @@ class LiveSessionController extends ChangeNotifier {
     return _stopSession();
   }
 
+  void resetToReady() {
+    if (_isDisposed || _state != LiveSessionState.ready) {
+      return;
+    }
+    _hasStoppedSession = false;
+    _transcriptSegments.clear();
+    _translationState = const TranslationState();
+    _activeTranslationStreamId = null;
+    _errorMessage = null;
+    _canOpenAppSettings = false;
+    _canRetry = false;
+    _retryKind = null;
+    _accumulatedElapsed = Duration.zero;
+    _listeningStartedAt = null;
+    _notifyListeners();
+  }
+
   Future<void> _stopSession() {
     final activeStop = _stopFuture;
     if (activeStop != null) {

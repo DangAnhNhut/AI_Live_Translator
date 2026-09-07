@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 
 import 'benchmark/stt_benchmark.dart';
 import 'diagnostics/stt_transcript_trace.dart';
-import 'screens/live_session_screen.dart';
+import 'screens/home_screen.dart';
 import 'services/audio_input.dart';
 import 'services/debug_stt_session_transport.dart';
 import 'services/microphone_capture_service.dart';
@@ -66,7 +66,7 @@ class _AiLiveTranslatorAppState extends State<AiLiveTranslatorApp> {
       title: 'AI Live Translator',
       debugShowCheckedModeBanner: false,
       theme: buildAppTheme(),
-      home: LiveSessionScreen(
+      home: HomeScreen(
         controller: _controller,
         debugControls: widget.debugControls,
       ),
