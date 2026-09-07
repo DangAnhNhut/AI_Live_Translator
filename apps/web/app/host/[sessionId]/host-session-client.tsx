@@ -2,11 +2,10 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { AudioSourcePanel } from "@/components/host/audio-source-panel";
 import { HostHeader } from "@/components/host/host-header";
-import { HostStatus } from "@/components/host/host-status";
-import { TranslationLanguagePanel } from "@/components/host/translation-language-panel";
-import { LanguagePair } from "@/components/live/language-pair";
+import { HostReadyCanvas } from "@/components/host/host-ready-canvas";
+import { HostRightPanel } from "@/components/host/host-right-panel";
+import { HostSidebar } from "@/components/host/host-sidebar";
 import { TranslationTranscriptPanel } from "@/components/live/translation-transcript-panel";
 import type { AudioCaptureInfo, AudioInput } from "@/lib/audio/audio-input";
 import { MicrophoneAudioInput } from "@/lib/audio/microphone-audio-input";
@@ -53,6 +52,80 @@ type HostSessionClientProps = {
 
 type CleanupReason = "deliberate" | "capture-ended" | "error" | "unmount";
 
+function isPreviewLive(): boolean {
+  if (typeof window === "undefined") return false;
+  return new URLSearchParams(window.location.search).get("preview") === "live";
+}
+
+const DEMO_PREVIEW_TRANSLATION_STATE = {
+  configurations: [
+    {
+      streamId: "stream_demo",
+      sourceLanguage: "vi" as const,
+      targetLanguage: "en" as const,
+    },
+  ],
+  utterances: [
+    {
+      streamId: "stream_demo",
+      utteranceId: "utt_001",
+      sourceSegmentIds: ["seg_001"],
+      sourceText:
+        "Chào mừng quý vị và các bạn đã tham gia buổi thuyết trình trực tiếp hôm nay.",
+      sourceLanguage: "vi" as const,
+      targetLanguage: "en" as const,
+      translatedText:
+        "Welcome everyone to today's live presentation and technology overview.",
+      status: "final" as const,
+    },
+    {
+      streamId: "stream_demo",
+      utteranceId: "utt_002",
+      sourceSegmentIds: ["seg_002"],
+      sourceText:
+        "Chúng tôi đang chia sẻ giải pháp dịch thuật đa ngôn ngữ thời gian thực trên giao diện web.",
+      sourceLanguage: "vi" as const,
+      targetLanguage: "en" as const,
+      translatedText:
+        "We are demonstrating real-time multilingual translation capabilities on the web interface.",
+      status: "final" as const,
+    },
+    {
+      streamId: "stream_demo",
+      utteranceId: "utt_003",
+      sourceSegmentIds: ["seg_003"],
+      sourceText:
+        "Hệ thống tự động phát hiện giọng nói và căn chỉnh song ngữ chính xác theo từng phát ngôn.",
+      sourceLanguage: "vi" as const,
+      targetLanguage: "en" as const,
+      status: "pending" as const,
+    },
+    {
+      streamId: "stream_demo",
+      utteranceId: "utt_004",
+      sourceSegmentIds: ["seg_004"],
+      sourceText:
+        "Đoạn văn bản sau đây minh họa kịch bản khi dịch vụ dịch thuật gặp gián đoạn tạm thời.",
+      sourceLanguage: "vi" as const,
+      targetLanguage: "en" as const,
+      status: "failed" as const,
+      errorCode: "provider_unavailable" as const,
+      errorMessage: "Translation service temporarily unavailable",
+    },
+  ],
+  sessionErrors: [],
+};
+
+const DEMO_PREVIEW_SEGMENTS: readonly TranscriptSegment[] = [
+  {
+    id: "seg_interim_001",
+    streamId: "stream_demo",
+    text: "và bây giờ chúng ta sẽ cùng theo dõi các luồng âm thanh tiếp theo...",
+    language: "vi",
+    kind: "interim",
+  },
+];
+
 export function HostSessionClient({ sessionId }: HostSessionClientProps) {
   const producerUrl = useMemo(() => {
     try {
@@ -61,22 +134,54 @@ export function HostSessionClient({ sessionId }: HostSessionClientProps) {
       return null;
     }
   }, []);
-  const [state, setState] = useState<HostSessionState>("ready");
-  const [audioSelection, setAudioSelection] =
-    useState<HostAudioSelection>(createHostAudioSelection);
-  const [translationSelection, setTranslationSelection] =
-    useState<HostTranslationSelection>(createHostTranslationSelection);
-  const [translationState, setTranslationState] = useState(
-    createTranslationState,
+  const [state, setState] = useState<HostSessionState>(() =>
+    isPreviewLive() ? "live" : "ready",
   );
-  const [segments, setSegments] = useState<readonly TranscriptSegment[]>([]);
+  const [audioSelection, setAudioSelection] = useState<HostAudioSelection>(() =>
+    isPreviewLive()
+      ? { selectedSource: "microphone", locked: true }
+      : createHostAudioSelection(),
+  );
+  const [translationSelection, setTranslationSelection] =
+    useState<HostTranslationSelection>(() =>
+      isPreviewLive()
+        ? { targetLanguage: "en", locked: true }
+        : createHostTranslationSelection(),
+    );
+  const [translationState, setTranslationState] = useState(() =>
+    isPreviewLive() ? DEMO_PREVIEW_TRANSLATION_STATE : createTranslationState(),
+  );
+  const [segments, setSegments] = useState<readonly TranscriptSegment[]>(() =>
+    isPreviewLive() ? DEMO_PREVIEW_SEGMENTS : [],
+  );
   const [captureInfo, setCaptureInfo] = useState<AudioCaptureInfo | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+
   const audioInputRef = useRef<AudioInput | null>(null);
   const producerRef = useRef<SttProducerClient | null>(null);
   const cleanupPromiseRef = useRef<Promise<void> | null>(null);
   const operationRef = useRef(0);
   const mountedRef = useRef(true);
+
+  const sessionStartTimeRef = useRef<number | null>(null);
+
+  // Presentation-only local elapsed timer
+  useEffect(() => {
+    if (state !== "live") {
+      sessionStartTimeRef.current = null;
+      return;
+    }
+    sessionStartTimeRef.current = Date.now();
+    const interval = window.setInterval(() => {
+      if (sessionStartTimeRef.current !== null) {
+        setElapsedSeconds(
+          Math.floor((Date.now() - sessionStartTimeRef.current) / 1000),
+        );
+      }
+    }, 1000);
+    return () => window.clearInterval(interval);
+  }, [state]);
 
   const cleanupSession = useCallback(
     (reason: CleanupReason, errorMessage?: string): Promise<void> => {
@@ -170,6 +275,7 @@ export function HostSessionClient({ sessionId }: HostSessionClientProps) {
     setTranslationState(createTranslationState());
     setCaptureInfo(null);
     setMessage(null);
+    setElapsedSeconds(0);
     setAudioSelection((current) => lockHostAudioSelection(current));
     setTranslationSelection((current) =>
       lockHostTranslationSelection(current),
@@ -286,124 +392,71 @@ export function HostSessionClient({ sessionId }: HostSessionClientProps) {
   const activeTranslationConfiguration =
     getActiveTranslationConfiguration(translationState);
 
+  const isReadyEmptyState =
+    state === "ready" &&
+    segments.length === 0 &&
+    translationState.utterances.length === 0;
+
   return (
-    <div className="min-h-screen bg-background text-text-primary">
-      <HostHeader />
-      <main className="relative overflow-hidden">
-        <div
-          aria-hidden="true"
-          className="pointer-events-none absolute inset-x-0 top-0 h-[440px] bg-[radial-gradient(circle_at_90%_0%,rgba(79,95,231,0.12),transparent_52%),radial-gradient(circle_at_0%_75%,rgba(116,86,232,0.08),transparent_46%)]"
+    <div className="h-screen w-screen overflow-hidden flex flex-row bg-surface text-slate-900 select-none">
+      {/* 1. Left Persistent Minimal Product Rail */}
+      <HostSidebar sessionId={sessionId} isLive={state === "live"} />
+
+      {/* 2. Main Desktop Workstation Workspace */}
+      <div className="flex-1 h-full flex flex-col min-w-0 overflow-hidden bg-surface">
+        {/* Top 64px Session Header */}
+        <HostHeader
+          sessionId={sessionId}
+          state={state}
+          selectedSource={audioSelection.selectedSource}
+          targetLanguage={translationSelection.targetLanguage}
+          elapsedSeconds={elapsedSeconds}
         />
-        <div className="relative mx-auto w-full max-w-[1280px] px-4 py-8 sm:px-8 sm:py-12 lg:px-12">
-          <section className="mb-8 flex flex-col gap-5 md:flex-row md:items-end md:justify-between">
-            <div className="max-w-2xl">
-              <p className="text-xs font-semibold uppercase tracking-[0.05em] text-brand-primary">
-                Web audio host
-              </p>
-              <h1 className="mt-3 font-display text-3xl font-bold tracking-[-0.02em] text-text-primary sm:text-4xl">
-                Turn audio into live captions
-              </h1>
-              <p className="mt-3 text-base leading-7 text-text-secondary sm:text-lg">
-                Use this device&apos;s microphone or share browser playback, then
-                follow the transcript while viewers receive the same session.
-              </p>
-            </div>
-            <HostStatus state={state} />
-          </section>
 
-          <div className="grid items-start gap-6 lg:grid-cols-[320px_minmax(0,1fr)]">
-            <aside className="grid gap-4">
-              <AudioSourcePanel
-                state={state}
-                selectedSource={audioSelection.selectedSource}
-                sourceLocked={audioSelection.locked}
-                canStart={canStartHostSession(state, audioSelection)}
-                captureInfo={captureInfo}
-                message={message}
-                onSelectSource={selectAudioSource}
-                onStart={() => void startSession()}
-                onStop={stopSession}
-              />
+        {/* Center Workspace (Ready Canvas vs Live Split Workspace) */}
+        <main className="flex-1 h-full overflow-hidden flex flex-col">
+          {isReadyEmptyState ? (
+            <HostReadyCanvas
+              selectedSource={audioSelection.selectedSource}
+              targetLanguage={translationSelection.targetLanguage}
+              canStart={canStartHostSession(state, audioSelection)}
+              onStart={() => void startSession()}
+              message={message}
+              state={state}
+            />
+          ) : (
+            <TranslationTranscriptPanel
+              segments={segments}
+              translationState={translationState}
+              translationExpected
+              emptyTitle={
+                audioSelection.selectedSource === "microphone"
+                  ? "Waiting for microphone speech…"
+                  : "Waiting for System Audio…"
+              }
+              emptyDescription="Speech will appear in real time and translate into your chosen target language."
+            />
+          )}
+        </main>
+      </div>
 
-              <TranslationLanguagePanel
-                selection={translationSelection}
-                activeConfiguration={activeTranslationConfiguration}
-                onTargetChange={selectTargetLanguage}
-              />
-
-              <section className="rounded-2xl border border-border-default bg-white p-5 shadow-[0_10px_24px_-20px_rgba(17,24,39,0.18)]">
-                <h2 className="font-display text-lg font-semibold text-text-primary">
-                  Session details
-                </h2>
-                <dl className="mt-5 space-y-4">
-                  <div>
-                    <dt className="text-xs font-semibold uppercase tracking-[0.05em] text-text-secondary">
-                      Session ID
-                    </dt>
-                    <dd className="mt-1 break-all font-mono text-sm font-medium text-text-primary">
-                      {sessionId}
-                    </dd>
-                  </div>
-                  <div className="border-t border-border-default pt-4">
-                    <dt className="text-xs font-semibold uppercase tracking-[0.05em] text-text-secondary">
-                      Source speech
-                    </dt>
-                    <dd className="mt-1 text-sm font-medium text-text-primary">
-                      Vietnamese
-                    </dd>
-                  </div>
-                  <div className="border-t border-border-default pt-4">
-                    <dt className="sr-only">Active Translation languages</dt>
-                    <dd>
-                      <LanguagePair
-                        configuration={activeTranslationConfiguration}
-                      />
-                    </dd>
-                  </div>
-                  <div className="border-t border-border-default pt-4">
-                    <dt className="text-xs font-semibold uppercase tracking-[0.05em] text-text-secondary">
-                      Audio handling
-                    </dt>
-                    <dd className="mt-1 text-sm leading-6 text-text-primary">
-                      Transient streaming only; no recording or playback.
-                    </dd>
-                  </div>
-                </dl>
-              </section>
-            </aside>
-
-            <section
-              aria-label="Host transcript workspace"
-              className="overflow-hidden rounded-2xl border border-border-default bg-white shadow-[0_10px_30px_-16px_rgba(17,24,39,0.16)]"
-            >
-              <div className="flex min-h-16 flex-wrap items-center justify-between gap-4 border-b border-border-default bg-white px-4 py-3 sm:px-6">
-                <div>
-                  <p className="font-display text-sm font-semibold text-text-primary sm:text-base">
-                    Host transcript
-                  </p>
-                  <p className="mt-0.5 max-w-[55vw] truncate font-mono text-xs text-text-secondary sm:max-w-none">
-                    {sessionId}
-                  </p>
-                </div>
-                <HostStatus state={state} />
-              </div>
-              <TranslationTranscriptPanel
-                segments={segments}
-                translationState={translationState}
-                translationExpected
-                emptyTitle={
-                  audioSelection.selectedSource === "microphone"
-                    ? "Waiting for microphone speech…"
-                    : audioSelection.selectedSource === "system"
-                      ? "Waiting for System Audio…"
-                      : "Choose an audio source"
-                }
-                emptyDescription="Select a source and start the session. Recognized speech will appear here."
-              />
-            </section>
-          </div>
-        </div>
-      </main>
+      {/* 3. Right 340px Docked Session Control Panel */}
+      <HostRightPanel
+        sessionId={sessionId}
+        state={state}
+        selectedSource={audioSelection.selectedSource}
+        sourceLocked={audioSelection.locked}
+        canStart={canStartHostSession(state, audioSelection)}
+        captureInfo={captureInfo}
+        message={message}
+        onSelectSource={selectAudioSource}
+        onStart={() => void startSession()}
+        onStop={stopSession}
+        targetLanguage={translationSelection.targetLanguage}
+        targetLocked={translationSelection.locked}
+        onTargetChange={selectTargetLanguage}
+        activeConfiguration={activeTranslationConfiguration}
+      />
     </div>
   );
 }
