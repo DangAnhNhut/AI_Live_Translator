@@ -19,7 +19,8 @@ export const metadata: Metadata = {
     default: "AI Live Translator",
     template: "%s | AI Live Translator",
   },
-  description: "Follow live speech captions from AI Live Translator sessions.",
+  description:
+    "Realtime bilingual speech translation and live caption workstation for presenters and audiences.",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

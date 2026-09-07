@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "node --no-warnings --experimental-strip-types --test \"lib/realtime/*.test.mjs\" \"lib/audio/*.test.mjs\" \"lib/stt/*.test.mjs\" \"lib/host/*.test.mjs\""
+    "test": "node --no-warnings --experimental-strip-types --test \"lib/realtime/*.test.mjs\" \"lib/audio/*.test.mjs\" \"lib/stt/*.test.mjs\" \"lib/host/*.test.mjs\" \"lib/home/*.test.mjs\""
   },
   "dependencies": {
     "next": "16.3.2",
